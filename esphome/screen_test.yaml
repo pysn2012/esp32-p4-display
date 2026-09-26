@@ -3,6 +3,14 @@
 # ============================================================
 # 目标   : ST7102 MIPI-DSI 480x800 点屏，显示 ESPHome 彩色测试卡
 # 编译   : 仅需此单文件，无 secrets 依赖，可直接推 GitHub 在线编译
+# ★ 必读 : 必须用 esphome 2026.9.0 或更高版本编译！
+#          2026-09-05 上游提交 #18984 "[mipi_dsi] Let IDF pick the DPHY PLL
+#          reference clock" 修复了 P4 DSI 初始化崩溃。旧版(<=2025.11.5)
+#          会在此处 abort 无限重启（已实测：背光亮但黑屏 + abort 循环）。
+# 说明   : 工作区的 lcd_st7102/ 与 touch_st7123/ 是乐鑫官方 esp_lcd C 组件
+#          （esp_lcd_new_panel_st7102_mipi / esp_lcd_touch_new_i2c_st7123），
+#          没有 ESPHome 所需的 __init__.py schema，不能直接当 external_components。
+#          ESPHome 的 mipi_dsi 组件已封装了同一套 IDF C API，无需也无法替换。
 # 烧录   : USB 下载（本阶段无 WiFi —— WiFi 走 C6 协处理器，M1 不引入）
 # 日志   : USB 串口 115200，重点看 mipi_dsi 初始化与 DSI 报错
 # 通过   : 屏幕显示彩色测试卡（渐变+网格），无花屏/偏色/重影
@@ -56,12 +64,12 @@ display:
       width: 480
       height: 800
     lanes: 2
-    # 关键：lane_bit_rate 必须满足 pclk × bpp / (lanes × 0.8) 的带宽需求
-    # 36MHz × 16bit = 576Mbps 需求 → 750Mbps（2 lanes）余量充足
-    # （500Mbps@RGB888 时带宽不足，IDF 驱动内部断言 → abort 循环，已实测踩坑）
-    lane_bit_rate: 750Mbps
+    # 500Mbps 为 screen.py 板级实测值（面板已验证可跑）
+    # 注意：必须用 esphome 2026.9+ 编译 —— 2026-09-05 的 #18984 修复了
+    # DPHY PLL 参考时钟选取，旧版(2025.11.5)在此处 abort 崩溃循环（已踩坑实测）
+    lane_bit_rate: 500Mbps
     pclk_frequency: 36MHz
-    # color_depth 不写 = 默认 16bit（RGB565），与 Tab5 官方一致，帧缓冲更省
+    # color_depth 不写 = 默认 16bit（RGB565），帧缓冲更省
     # 时序全部来自已跑通的 MicroPython screen.py（板级实测有效）
     hsync_back_porch: 40
     hsync_pulse_width: 2
