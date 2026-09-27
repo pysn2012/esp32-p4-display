@@ -108,10 +108,14 @@ void MipiDsi::setup() {
   if (this->reset_pin_ != nullptr) {
     this->reset_pin_->setup();
     this->reset_pin_->digital_write(true);
-    delay(5);
+    delay(10);
     this->reset_pin_->digital_write(false);
-    delay(5);
+    // RESETX low pulse must be >= 10ms: on warm reset the panel is still powered
+    // and this pulse is its only reset source (cold boot has internal POR).
+    // Timing aligned with Espressif esp_lcd_st7102_mipi.c panel_st7102_reset().
+    delay(10);
     this->reset_pin_->digital_write(true);
+    delay(10);
   } else {
     esp_lcd_panel_io_tx_param(this->io_handle_, SW_RESET_CMD, nullptr, 0);
   }
