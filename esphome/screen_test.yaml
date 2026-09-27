@@ -1,10 +1,10 @@
 # ============================================================
-# DFR1286 (ESP32-P4) M1 —— 屏幕点亮测试
+# ESP32-P4 开发板 M1 —— 屏幕点亮测试
 # ============================================================
 # 目标   : ST7102 MIPI-DSI 480x800 点屏，显示 ESPHome 彩色测试卡
 # 编译   : 仅需此单文件，无 secrets 依赖，可直接推 GitHub 在线编译
 # ★ 必读 : 本配置用了 external_components 引入"打过补丁的 mipi_dsi"（见下方说明）。
-#          推送 GitHub 时整个 dfr1286/ 目录都要提交（含 components/ 子目录）。
+#          推送 GitHub 时整个仓库都要提交（含 esphome/components/ 子目录）。
 #          补丁原因：ESP32-P4 rev3.0+（本板 v3.2）与上游 mipi_dsi 已知不兼容，
 #          会在 esp_lcd_new_dsi_bus() 内 abort。详见 驱动来源说明.md。
 # 版本   : esphome >= 2026.9.0（更低版本另有别的兼容问题）
@@ -18,7 +18,7 @@
 # 后续   : 通过后关 show_test_card、update_interval 改 never，进 M2 触摸
 # ============================================================
 substitutions:
-  name: dfr1286-screen-test
+  name: p4-screen-test
 
 esphome:
   name: ${name}
@@ -38,6 +38,8 @@ external_components:
 esp32:
   variant: esp32p4
   flash_size: 16MB
+  # 显式 360MHz：缺省取 400MHz 会报"实验性可能无法启动"警告（issue #13425）
+  cpu_frequency: 360MHz
   framework:
     type: esp-idf
 

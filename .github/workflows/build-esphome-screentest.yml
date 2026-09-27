@@ -23,7 +23,10 @@ jobs:
       - name: 安装 ESPHome
         run: |
           python -m pip install --upgrade pip
-          pip install esphome
+          # 必须锁定 2026.9.0：
+          # 1) 本仓库 mipi_dsi 组件副本基于 2026.9.0（用了该版本的 API）
+          # 2) 不锁版本时 CI 可能装到旧版 → AttributeError: transform_schema
+          pip install esphome==2026.9.0
 
       # 步骤4：编译固件
       - name: 编译固件
@@ -40,9 +43,11 @@ jobs:
           SEARCH_ROOT="esphome/.esphome/build"   # 与编译目录对应
           OTA=$(find "$SEARCH_ROOT" -name "firmware.ota.bin" | head -n 1)
           FACTORY=$(find "$SEARCH_ROOT" -name "firmware.factory.bin" | head -n 1)
+          ELF=$(find "$SEARCH_ROOT" -name "firmware.elf" | head -n 1)
 
           echo "OTA=$OTA" >> $GITHUB_OUTPUT
           echo "FACTORY=$FACTORY" >> $GITHUB_OUTPUT
+          echo "ELF=$ELF" >> $GITHUB_OUTPUT
 
       # 步骤6：上传固件
       - name: 上传固件到 Artifacts
@@ -52,5 +57,8 @@ jobs:
           path: |
             ${{ steps.find_fw.outputs.OTA }}
             ${{ steps.find_fw.outputs.FACTORY }}
+            ${{ steps.find_fw.outputs.ELF }}
             esphome/screen_test.yaml
+          # 产物缺失时显式失败，避免静默上传空包
+          if-no-files-found: error
           retention-days: 30
