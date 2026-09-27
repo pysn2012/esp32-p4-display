@@ -3,10 +3,11 @@
 # ============================================================
 # 目标   : ST7102 MIPI-DSI 480x800 点屏，显示 ESPHome 彩色测试卡
 # 编译   : 仅需此单文件，无 secrets 依赖，可直接推 GitHub 在线编译
-# ★ 必读 : 必须用 esphome 2026.9.0 或更高版本编译！
-#          2026-09-05 上游提交 #18984 "[mipi_dsi] Let IDF pick the DPHY PLL
-#          reference clock" 修复了 P4 DSI 初始化崩溃。旧版(<=2025.11.5)
-#          会在此处 abort 无限重启（已实测：背光亮但黑屏 + abort 循环）。
+# ★ 必读 : 本配置用了 external_components 引入"打过补丁的 mipi_dsi"（见下方说明）。
+#          推送 GitHub 时整个 dfr1286/ 目录都要提交（含 components/ 子目录）。
+#          补丁原因：ESP32-P4 rev3.0+（本板 v3.2）与上游 mipi_dsi 已知不兼容，
+#          会在 esp_lcd_new_dsi_bus() 内 abort。详见 驱动来源说明.md。
+# 版本   : esphome >= 2026.9.0（更低版本另有别的兼容问题）
 # 说明   : 工作区的 lcd_st7102/ 与 touch_st7123/ 是乐鑫官方 esp_lcd C 组件
 #          （esp_lcd_new_panel_st7102_mipi / esp_lcd_touch_new_i2c_st7123），
 #          没有 ESPHome 所需的 __init__.py schema，不能直接当 external_components。
@@ -21,6 +22,18 @@ substitutions:
 
 esphome:
   name: ${name}
+
+# 本地外部组件：打补丁的 mipi_dsi
+# 原因：ESP32-P4 rev 3.0+（本板 v3.2）会让上游 mipi_dsi 在 esp_lcd_new_dsi_bus()
+# 内 abort —— 它硬编码了 .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT(PLL_F20M)，
+# 而 rev3.0+ 只接受 XTAL/APLL/CPLL/SPLL/MPLL，其余走 default: abort()。
+# 上游修复 PR #18984（2026-09-05）删掉该赋值让 IDF 运行时自选，但尚未进 2026.9.0 发行版。
+# 这里放一份打过补丁的副本，等上游发版后可删除。
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [mipi_dsi]
 
 esp32:
   variant: esp32p4
