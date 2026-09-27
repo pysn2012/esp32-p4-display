@@ -17,7 +17,9 @@ jobs:
       - name: 配置 Python 环境
         uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          # esphome 2026.9.0 要求 Python >=3.12,<3.15（PyPI metadata 实锤）
+          # 3.11 会装到 2026.6.5（2026.7.0+ 全部被跳过）→ 必须用 3.13
+          python-version: '3.13'
 
       # 步骤3：安装 ESPHome
       - name: 安装 ESPHome
