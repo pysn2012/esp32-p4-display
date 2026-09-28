@@ -22,6 +22,28 @@ substitutions:
 
 esphome:
   name: ${name}
+  # ===== 背光自检序列（纯串口，无网络；验证完可整段删除）=====
+  # 一次性时间线，对照串口日志与屏幕亮度：
+  #   启动 → 背光 ON（极性正确则应"亮"） / 6s → OFF / 12s → ON
+  #   18s → 绕过 PWM，把 GPIO11 钉死在高电平（判断高电平是亮还是暗）
+  on_boot:
+    priority: -100
+    then:
+      - logger.log: ">> [T0] backlight ON (GPIO11 active / inverted=true -> LOW)"
+      - output.turn_on: backlight_pwm
+      - delay: 6s
+      - logger.log: ">> [T6] backlight OFF - screen should go dark"
+      - output.turn_off: backlight_pwm
+      - delay: 6s
+      - logger.log: ">> [T12] backlight ON again"
+      - output.turn_on: backlight_pwm
+      - delay: 6s
+      - logger.log: ">> [T18] GPIO11 pinned HIGH (PWM released) - step means pin HIGH = LIT"
+      - output.turn_off: backlight_pwm
+      - lambda: |-
+          gpio_reset_pin(GPIO_NUM_11);
+          gpio_set_direction(GPIO_NUM_11, GPIO_MODE_OUTPUT);
+          gpio_set_level(GPIO_NUM_11, 1);
 
 # 本地外部组件：打补丁的 mipi_dsi
 # 原因：ESP32-P4 rev 3.0+（本板 v3.2）会让上游 mipi_dsi 在 esp_lcd_new_dsi_bus()
@@ -55,14 +77,19 @@ esp_ldo:
     channel: 3
 
 output:
-  # 背光 PWM：GPIO11，低电平点亮（MicroPython 侧为低有效 → inverted）
-  # 开机默认 100% 亮，无需任何交互
+  # 背光 PWM：GPIO11，低电平点亮（MicroPython screen.py 的 STATE_LOW → inverted）
+  # ★ 极性若反（屏幕不亮或常亮），把 inverted 改成 false 即可
   - platform: ledc
     pin:
       number: GPIO11
       inverted: true
     id: backlight_pwm
     frequency: 1000Hz
+    # 若上电全亮、调光无反应 → 该脚可能只是背光 EN（非 PWM 调光）
+    # 此时改零阈值开关（去掉 frequency）：
+    #   - platform: gpio
+    #     pin: {number: GPIO11, inverted: true}
+    #     id: backlight_pwm
 
 display:
   - platform: mipi_dsi
@@ -115,15 +142,17 @@ display:
     #   自己再写一遍 = 面板收到两套 Sleep-Out/Display-On 流程 → 显示异常（实测踩坑）。
     #   官方 M5STACK-TAB5-ST7123 模型的序列同样不含这两条命令。
 
-# 背光 light 放在 display 之后声明：
-# ESPHome 按声明顺序 setup → 背光在屏幕初始化完成后才点亮
-# （对齐 MicroPython screen.py 的 init → set_backlight 顺序）
+# ★ 诊断跑完后，把下面这段换成正式配置：
+#   删除 esphome.on_boot 自检段，light 的 name 改回 "屏幕背光"。
+
+# 背光（display 之后声明 → 屏幕 init 完成后才点亮，对齐 MicroPython 顺序）
 light:
   - platform: monochromatic
     output: backlight_pwm
     id: backlight
-    name: "屏幕背光"
     restore_mode: RESTORE_DEFAULT_ON
+
+# ===== 背光自检序列已移至文件顶部 esphome.on_boot（验证完删除）=====
 
 logger:
   level: DEBUG
