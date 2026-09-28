@@ -22,28 +22,9 @@ substitutions:
 
 esphome:
   name: ${name}
-  # ===== 背光自检序列（纯串口，无网络；验证完可整段删除）=====
-  # 一次性时间线，对照串口日志与屏幕亮度：
-  #   启动 → 背光 ON（极性正确则应"亮"） / 6s → OFF / 12s → ON
-  #   18s → 绕过 PWM，把 GPIO11 钉死在高电平（判断高电平是亮还是暗）
-  on_boot:
-    priority: -100
-    then:
-      - logger.log: ">> [T0] backlight ON (GPIO11 active / inverted=true -> LOW)"
-      - output.turn_on: backlight_pwm
-      - delay: 6s
-      - logger.log: ">> [T6] backlight OFF - screen should go dark"
-      - output.turn_off: backlight_pwm
-      - delay: 6s
-      - logger.log: ">> [T12] backlight ON again"
-      - output.turn_on: backlight_pwm
-      - delay: 6s
-      - logger.log: ">> [T18] GPIO11 pinned HIGH (PWM released) - step means pin HIGH = LIT"
-      - output.turn_off: backlight_pwm
-      - lambda: |-
-          gpio_reset_pin(GPIO_NUM_11);
-          gpio_set_direction(GPIO_NUM_11, GPIO_MODE_OUTPUT);
-          gpio_set_level(GPIO_NUM_11, 1);
+  # ★ 注意：不要在这里用长 delay 做测试序列 —— on_boot 的 delay 会阻塞
+  #   主循环，而显示刷新（update_interval）是主循环驱动的，结果就是
+  #   屏幕长时间得不到刷新 → 图形消失（已实测踩坑，见驱动来源说明.md）
 
 # 本地外部组件：打补丁的 mipi_dsi
 # 原因：ESP32-P4 rev 3.0+（本板 v3.2）会让上游 mipi_dsi 在 esp_lcd_new_dsi_bus()
@@ -77,18 +58,19 @@ esp_ldo:
     channel: 3
 
 output:
-  # 背光 PWM：GPIO11，低电平点亮（MicroPython screen.py 的 STATE_LOW → inverted）
-  # ★ 极性若反（屏幕不亮或常亮），把 inverted 改成 false 即可
+  # 背光 PWM：GPIO11
+  # ★ 实测极性（2026-09-28）：GPIO11 = HIGH → 背光亮，LOW → 暗
+  #   （自检序列 T6/T18 把脚拉高→亮，T0/T12 拉低→暗，四次全部吻合）
+  #   因此 inverted 必须为 false（不反相：占空比越大 = 电平越高 = 越亮）
   - platform: ledc
     pin:
       number: GPIO11
-      inverted: true
+      inverted: false
     id: backlight_pwm
     frequency: 1000Hz
-    # 若上电全亮、调光无反应 → 该脚可能只是背光 EN（非 PWM 调光）
-    # 此时改零阈值开关（去掉 frequency）：
+    # 若调光无反应（只有亮/灭两态）→ 该脚可能只是背光 EN，改零阈值开关：
     #   - platform: gpio
-    #     pin: {number: GPIO11, inverted: true}
+    #     pin: {number: GPIO11, inverted: false}
     #     id: backlight_pwm
 
 display:
@@ -142,17 +124,15 @@ display:
     #   自己再写一遍 = 面板收到两套 Sleep-Out/Display-On 流程 → 显示异常（实测踩坑）。
     #   官方 M5STACK-TAB5-ST7123 模型的序列同样不含这两条命令。
 
-# ★ 诊断跑完后，把下面这段换成正式配置：
-#   删除 esphome.on_boot 自检段，light 的 name 改回 "屏幕背光"。
+# 正式配置（自检序列已移除 —— 它会阻塞主循环导致图形消失）
 
 # 背光（display 之后声明 → 屏幕 init 完成后才点亮，对齐 MicroPython 顺序）
 light:
   - platform: monochromatic
     output: backlight_pwm
     id: backlight
+    # name 保持留空：M1 无网络，避免实体名带来的 noise；正式版再加 name
     restore_mode: RESTORE_DEFAULT_ON
-
-# ===== 背光自检序列已移至文件顶部 esphome.on_boot（验证完删除）=====
 
 logger:
   level: DEBUG
