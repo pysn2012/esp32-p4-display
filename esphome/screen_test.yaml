@@ -80,6 +80,12 @@ display:
     dimensions:
       width: 480
       height: 800
+    # ★ 显示方向（2026-09-28 实测推导）：画面需逆时针转 90° 才正 → rotation: 90
+    #   依据：未设 rotation 时逻辑画布 480x800，测试卡 R|G|B 横排在中线；
+    #   现象"B 出现在红色块位置(R 之下/另一侧)"与 rotation=90 的映射吻合
+    #   （rotation=90: R→上、G→中、B→下；270 则相反）
+    #   若烧录后文字/色块方向反了，就在 90 与 270 之间对调
+    rotation: 90
     lanes: 2
     # 500Mbps 为 screen.py 板级实测值（面板已验证可跑）
     # 注意：必须用 esphome 2026.9+ 编译 —— 2026-09-05 的 #18984 修复了
@@ -131,8 +137,10 @@ light:
   - platform: monochromatic
     output: backlight_pwm
     id: backlight
-    # name 保持留空：M1 无网络，避免实体名带来的 noise；正式版再加 name
-    restore_mode: RESTORE_DEFAULT_ON
+    name: "屏幕背光"
+    # ★ ALWAYS_ON：不依赖 NVS 恢复，每次启动/复位都强制点亮
+    #   （此前用 RESTORE_DEFAULT_ON 且 light 无 name → 复位后可能不亮）
+    restore_mode: ALWAYS_ON
 
 logger:
   level: DEBUG
