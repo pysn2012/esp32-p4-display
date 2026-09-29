@@ -80,13 +80,29 @@ display:
     dimensions:
       width: 480
       height: 800
-    # ★ 显示方向（2026-09-28 实测推导）：画面需逆时针转 90° 才正 → rotation: 90
-    #   依据：未设 rotation 时逻辑画布 480x800，测试卡 R|G|B 横排在中线；
-    #   现象"B 出现在红色块位置(R 之下/另一侧)"与 rotation=90 的映射吻合
-    #   （rotation=90: R→上、G→中、B→下；270 则相反）
-    #   若烧录后文字/色块方向反了，就在 90 与 270 之间对调
-    rotation: 90
+    # ★★ 显示方向（2026-09-29 实锤修正）：rotation: 90 / 270 在本板根本走不通，必须去掉
+    #   根因：components/mipi_dsi/models/__init__.py 的 DsiDriverChip.transforms
+    #        做了 `super().transforms - {CONF_SWAP_XY}` —— DSI 模型被强制移除 swap_xy。
+    #        而 mipi/__init__.py 的 rotation_as_transform() 对 90/270 的判据是
+    #        "swap_xy ∈ transforms" 且 "mirror_x|mirror_y ∈ transforms" → 恒为假。
+    #   后果：90/270 走软件路径 → 破坏初始化序列 → 方向错、色块错位、复位后黑屏。
+    #        180 因为只需 mirror_x+mirror_y（这两个还在集合里）→ 真·硬件路径可用。
+    #   正确做法：display 段不写 rotation，方向交给面板本身的默认扫描方向。
+    #            真机若要竖屏，等 M2 触摸对齐时用 transform + 触摸 calibration 一起调。
+    #            参考工程 Tab5 也是把 rotation 写在 lvgl 段，display 段从不写 rotation。
+    # ★★★ 若烧录后画面整体倒置（180°），再启用下面这一行 —— 这是唯一可靠的硬件旋转：
+    # rotation: 180
     lanes: 2
+    # ★★ 颜色顺序（2026-09-29 实锤）：必须显式写 RGB，否则红蓝对调（B 红 / R 蓝）
+    #   根因链：
+    #   1) display.py 里 CUSTOM 模型的 color_order 默认值是 MODE_BGR（不是 RGB）；
+    #   2) mipi/__init__.py 的 get_madctl() 末尾：if color_order == BGR → madctl |= 0x08；
+    #   3) 该 0x36=MADCTL 命令被 add_madctl() 追加进序列，【覆盖】厂商序列 0xB0 首字节
+    #      隐含的色序设置（本板厂商序列 0xB0 = [0x22, 0x57, 0x1E, 0x61, 0x2F, 0x57, 0x61]）；
+    #   4) 面板于是工作在 BGR 模式 → 逻辑红显示成物理蓝，逻辑蓝显示成物理红。
+    #   官方 M5STACK-TAB5-ST7123 模型就是显式写 color_order="RGB"，且其序列不含 0xB0。
+    #   注意：这一步与 rotation 无关，是独立的坑 —— 别指望换 rotation 能把颜色换回来。
+    color_order: RGB
     # 500Mbps 为 screen.py 板级实测值（面板已验证可跑）
     # 注意：必须用 esphome 2026.9+ 编译 —— 2026-09-05 的 #18984 修复了
     # DPHY PLL 参考时钟选取，旧版(2025.11.5)在此处 abort 崩溃循环（已踩坑实测）
@@ -101,6 +117,15 @@ display:
     vsync_pulse_width: 2
     vsync_front_porch: 180
     reset_pin: GPIO21
+    # ★★ 复位后黑屏的处置（2026-09-29）
+    #   现象：上电（冷启动）能出图，按 RESET 键（热复位）屏幕亮但无图形。
+    #   已知：display.py 里 init_sequence 是编译期 python 算好后
+    #        cg.add(var.set_init_sequence(sequence)) 写进 C++ 变量的，复位后不变；
+    #        mipi_dsi.cpp 的 reset 段（10ms/10ms 脉冲）在每次 setup() 都会跑。
+    #   因此复位黑屏只剩两个可能：① 面板侧 TE 信号未重新同步
+    #        ② 组件 setup() 里 init 命令流在热复位时未真正落屏。
+    #   处置：把 TE 关掉（0x35 → 0x34）排除 ①；TE 只在面板主动回报刷新时才是必需的，
+    #        ESPHome 走 esp_lcd_panel_draw_bitmap 主动推帧，本就不依赖 TE。
     show_test_card: true      # M1 验证用；点屏后关闭
     auto_clear_enabled: false
     update_interval: 1s       # 测试卡需要周期刷新；正式使用改 never
