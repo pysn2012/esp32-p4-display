@@ -80,18 +80,33 @@ display:
     dimensions:
       width: 480
       height: 800
-    # ★★ 显示方向（2026-09-29 实锤修正）：rotation: 90 / 270 在本板根本走不通，必须去掉
-    #   根因：components/mipi_dsi/models/__init__.py 的 DsiDriverChip.transforms
-    #        做了 `super().transforms - {CONF_SWAP_XY}` —— DSI 模型被强制移除 swap_xy。
-    #        而 mipi/__init__.py 的 rotation_as_transform() 对 90/270 的判据是
-    #        "swap_xy ∈ transforms" 且 "mirror_x|mirror_y ∈ transforms" → 恒为假。
-    #   后果：90/270 走软件路径 → 破坏初始化序列 → 方向错、色块错位、复位后黑屏。
-    #        180 因为只需 mirror_x+mirror_y（这两个还在集合里）→ 真·硬件路径可用。
-    #   正确做法：display 段不写 rotation，方向交给面板本身的默认扫描方向。
-    #            真机若要竖屏，等 M2 触摸对齐时用 transform + 触摸 calibration 一起调。
-    #            参考工程 Tab5 也是把 rotation 写在 lvgl 段，display 段从不写 rotation。
-    # ★★★ 若烧录后画面整体倒置（180°），再启用下面这一行 —— 这是唯一可靠的硬件旋转：
-    # rotation: 180
+    # ★★ 显示方向（2026-09-30 定论）：rotation: 270
+    #
+    # 一、为什么 90/270 只能走软件路径（必须知道，否则会误判）
+    #   components/mipi_dsi/models/__init__.py 的 DsiDriverChip.transforms 做了
+    #   `super().transforms - {CONF_SWAP_XY}` —— DSI 模型被强制移除 swap_xy。
+    #   而 mipi/__init__.py 的 rotation_as_transform()：90 需 swap_xy∧mirror_x，
+    #   270 需 swap_xy∧mirror_y → 因 swap_xy 被删，两者恒为假 → 走 C++ 软件旋转。
+    #   只有 180（需 mirror_x∧mirror_y，这两个还在集合里）走 MADCTL 硬件路径。
+    #   （注：软件路径本身是自洽的 —— draw_pixel_at 会做完整坐标映射，
+    #    test_card() 用的是旋转感知的 get_width()/get_height()，不会错配。）
+    #
+    # 二、为什么是 270 而不是 90（两路交叉验证，不是猜）
+    #   ① 色序修正后的干净观测：rotation 0 时画面需【顺时针】转 90° 才正。
+    #   ② rotation 90 时观测到文字【倒置】(偏 180°) —— 该观测与颜色无关，可靠。
+    #      由 0→90 偏移量增加 90° 可知：rotation 90 施加的是【逆时针】90°，
+    #      与需要的方向相反；故 rotation 270 (= 顺时针 90°) 才是解。
+    #   ③ 同族屏佐证：M5 Tab5（720x1280，同样横屏使用）用的就是 270。
+    #
+    # 三、历史误区（记下来避免重犯）
+    #   之前 rotation 0 时曾判断"需逆时针 90°"，那是因为当时 color_order 未修、
+    #   红蓝对调，用户据以判断方向的"红色带"其实是 B 带 → 方向判断被色序污染而反转。
+    #   **判方向前必须先把 color_order 修对。**
+    #
+    # 四、如果这次仍然不对：看测试卡本身就能唯一定位
+    #   R/G/B 三个字母 + 三条渐变带的方位直接指示当前偏转量，
+    #   按 90/180/270 的整数倍报回来即可，不需要再试错。
+    rotation: 270
     lanes: 2
     # ★★ 颜色顺序（2026-09-29 实锤）：必须显式写 RGB，否则红蓝对调（B 红 / R 蓝）
     #   根因链：

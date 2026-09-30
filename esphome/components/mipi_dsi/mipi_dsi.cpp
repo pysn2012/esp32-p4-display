@@ -113,11 +113,20 @@ void MipiDsi::setup() {
     // RESETX low pulse must be >= 10ms: on warm reset the panel is still powered
     // and this pulse is its only reset source (cold boot has internal POR).
     // Timing aligned with Espressif esp_lcd_st7102_mipi.c panel_st7102_reset().
-    delay(10);
+    delay(20);
     this->reset_pin_->digital_write(true);
-    delay(10);
+    // ★★★ 2026-09-30 修复"上电有图 / 按 RESET 无图"：
+    //   面板复位释放后，必须等它规定的 settle 时间（ST7102 要求 ≥120ms）过去，
+    //   才能下发任何 DCS 命令。这里原来是 delay(10) —— 太短。
+    //   冷启动时上电爬坡 + 各种初始化已经耗掉大部分时间，所以侥幸能工作；
+    //   而热复位（按 RESET 键）时面板刚被上面这只脉冲复位、内部还在 settle，
+    //   紧接着就灌入 0x99 解锁等命令 → 命令被拒 → 背光亮但屏无图形。
+    //   这正是"上电正常、复位黑屏"的直接原因（与 DSI 带宽/PHY 无关）。
+    delay(120);
   } else {
     esp_lcd_panel_io_tx_param(this->io_handle_, SW_RESET_CMD, nullptr, 0);
+    // A software reset needs the same settling time before any further command.
+    delay(120);
   }
   // need to know when the display is ready for SLPOUT command - will be 120ms after reset
   auto when = millis() + 120;
