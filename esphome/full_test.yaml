@@ -12,28 +12,67 @@
 #          esphome/components/ 整个目录都要提交）：
 #            - mipi_dsi : 打过补丁（P4 rev3.0+ DPHY PLL 时钟源 abort）
 #            - st7123   : 触摸驱动，非上游组件，来自 M5 Tab5 工程
-# 硬件   : I2C  SDA=GPIO7  SCL=GPIO8 —— 触摸 0x55 / ES8388 0x10 共用
+# 硬件   : I2C  SDA=GPIO7  SCL=GPIO8 —— 触摸 0x55 / ES8388 0x11 共用
 #          触摸  TP_INT=GPIO20  TP_RST=GPIO13
 #          音频  I2S: MCLK=30 BCLK=29 LRCK=27 DOUT(播)=26 DIN(录)=28
 #                功放使能 PA_EN=GPIO31（PAM8302，厂商配置为高有效常开）
 # 通过   : ① 屏幕出现四角色块+十字 ② 黄点跟手 ③ 每次触摸有"滴"声
-# 排查   : 日志按顺序确认 —— I2C scan 出 0x55+0x10 → "Max Coord" 读到量程
-#          → ES8388 AudioCodec 初始化成功 → 触摸时 TOUCH 日志滚动
+# 排查   : 日志按顺序确认 ——
+#          [I][m3]: ES8388 DAC output BOTH enable = OK   ← 线输出使能成功（★ 新增，关键）
+#          [I][m3]: speaker start requested              ← 常驻音频流已请求（★ 新增）
+#          [D][i2s_audio.speaker.std]: ...（不再出现 Stopped）
+#          [I][m3]: BEEP 9600/9600 bytes running=1       ← 每次触摸（★ 关键：必须是 9600/9600 + running=1）
+#          另有 I2C scan 出 0x11+0x55+0x69、"Max Coord: 480 800"、触摸时 TOUCH 日志滚动
+# ============================================================
+# ★★ 2026-10-01 第二轮（上一轮"点了没声音"）已定位的三个独立缺陷，全在本文件修掉：
+#   ① ES8388 线输出从未使能 —— 上游 es8388.cpp 的 setup() 全文不写 0x04 DACPOWER
+#      与 0x2E~0x31（输出音量，复位 0x00 = -30dB），唯一会写它们的是 select 实体，
+#      我们没配 ⇒ 信号根本出不到 PAM8302。→ on_boot 调 set_dac_output(DAC_OUTPUT_BOTH)。
+#   ② speaker 缺省 timeout 500ms：空闲 500ms 后任务自杀并把 I2S 通道销毁，
+#      而 play() 见 state≠RUNNING 会 vTaskDelay(200ms)——状态机却在同类的主循环里，
+#      于是每轮第一下 play 必返 0（日志 BEEP written 0/19200，同时 touchscreen 被卡 230ms）。
+#      → timeout: never + on_boot 常驻 start()。
+#   ③ speaker 内部 stream info 是编译期默认 AudioStreamInfo(16bit,1ch,16kHz)，
+#      YAML 的 channel 对 speaker 无效（环缓 16000B = 单声道佐证）⇒ 立体声 PCM 是错的。
+#      → 改喂单声道 PCM（9600B），channel 写 mono 与实际一致。
 # ============================================================
 substitutions:
   name: p4-full-test
 
 esphome:
   name: ${name}
-  # ★ 开机横幅（2026-09-30 加）：日志第一屏就能确认烧进去的是哪个配置。
-  on_boot:
-    priority: 600
-    then:
-      - logger.log:
-          format: "===== BOOT CONFIG = M1+M2+M3 full_test ====="
-          level: INFO
+  # ★ 两个 on_boot：600 打印横幅（越早越好），-100 做音频收尾（必须晚于所有 setup）。
+  #   -100 = setup_priority::LATE，保证 ES8388 的 setup() 已经跑完。
   # ★ 不要在这里放长 delay —— on_boot 的 delay 会阻塞主循环，
-  #   显示刷新（update_interval）是主循环驱动的，会图形消失（M1 踩坑）
+  #   显示刷新（update_interval）是主循环驱动的，会图形消失（M1 踩坑）。
+  #   下面的 lambda 全是非阻塞调用。
+  on_boot:
+    - priority: 600
+      then:
+        - logger.log:
+            format: "===== BOOT CONFIG = M1+M2+M3 full_test ====="
+            level: INFO
+    - priority: -100
+      then:
+        - lambda: |-
+            // ★★ 2026-10-01：上游 es8388 组件的 setup() 从不调用 set_dac_output()，
+            //   寄存器 0x04 (DACPOWER，线输出使能) 与 0x2E~0x31 (LOUT1/ROUT1/LOUT2/ROUT2
+            //   输出音量，复位值 0x00 = -30dB) 一直停在复位值 ⇒ 模拟信号出不到 PAM8302。
+            //   唯一会写这两个的路径是 es8388 的 select 实体（我们没配），所以必须在这里补。
+            //   DAC_OUTPUT_BOTH 一次把四路音量置 0x1E(0dB) 并把 DACPOWER 写成 0x3C。
+            //   命名空间 esphome::es8388 与枚举值取自 components/es8388/es8388.h（已实核）。
+            bool dac_ok = id(es8388_codec).set_dac_output(esphome::es8388::DAC_OUTPUT_BOTH);
+            ESP_LOGI("m3", "ES8388 DAC output BOTH enable = %s", dac_ok ? "OK" : "FAIL");
+
+            // ★★ speaker 配了 timeout: never ⇒ 任务起来后不会再因空闲自杀。
+            //   这里只置一个 COMMAND_START 事件位（非阻塞），真正的启动在主循环的
+            //   I2SAudioSpeakerBase::loop() 里。启动后它会一直写静音，state 恒为 RUNNING，
+            //   于是触摸时 play() 不再走 vTaskDelay(200ms)、不会再返回 0 字节。
+            id(spk_out).start();
+            ESP_LOGI("m3", "speaker start requested");
+  # ★ 注意：set_audio_stream_info 只在 media_player 里被调用，普通 i2s_audio speaker 的
+  #   stream info 用的是 speaker.h 里的编译期默认值 (16bit / 1ch / 16kHz) ——
+  #   所以本文件所有 PCM 必须是「单声道 16bit 16kHz」，见下面 play_beep。
 
 external_components:
   - source:
@@ -95,7 +134,12 @@ output:
 
 switch:
   # 功放使能（PAM8302）：厂商配置为高电平使能、常开。
-  # 若触摸有日志但扬声器无声 → 尝试把 pin 加 inverted: true 再烧。
+  # ★ 若这次改完仍然无声，按下面顺序排查（软件侧三条已全部修掉，剩下的基本都是硬件）：
+  #   1) 把 pin: 改成 { number: GPIO31, inverted: true } 重烧 —— PA 极性是唯一还没实测过的软件项
+  #   2) 看日志 [I][m3]: BEEP 9600/9600 bytes running=1 是否出现：
+  #        running=0       → speaker 没起来（timeout: never 没生效 / 配置没真推上去）
+  #        9600 打满仍无声 → 数字链路全通，问题在 PA / ES8388 模拟输出 / 喇叭接线
+  #   3) 用万用表量 GPIO31 静态电平（应为高）、PAM8302 的 VDD 与喇叭两端有无直流偏置 1/2VDD
   - platform: gpio
     pin: GPIO31
     id: pa_enable
@@ -114,11 +158,14 @@ globals:
     initial_value: '-1'
 
 # ------------------------------------------------------------
-# M3 音频（官方 es8388 组件）
+# M3 音频（官方 es8388 组件 + i2s_audio speaker）
 # ★★ address 必须显式写 0x11 —— 实测 scan 只有 0x11 应答，组件缺省 0x10 会挂不上。
-# 组件 setup 会完成整颗 codec 初始化：DAC 输出 LIN1/RIN1、
-# ADC 录音路径（ALC 全套 + LIN1/RIN1 输入）、解除静音；
-# DAC 音量寄存器上电默认 0x00 = 最大音量，无需再设。
+# 组件 setup() 实核覆盖：DAC 数字路径（DACCONTROL1/2/16/17/20/21/23）、
+# ADC 录音路径（ALC 全套 + LIN1/RIN1）、解除 DAC 静音（DACCONTROL3 bit2）。
+# ★★ 但它「不写」两处输出侧寄存器，必须我们自己补（见上面 on_boot 的 -100）：
+#     0x04  DACPOWER —— 线输出使能（LOUT1/ROUT1/LOUT2/ROUT2）
+#     0x2E~0x31      —— 输出音量，复位 0x00 = -30dB（★ 不是 0dB）
+#   （DACCONTROL4/5 数字音量确实是 0x00 = 0dB，别和上面那条混淆）
 # ------------------------------------------------------------
 audio_dac:
   - platform: es8388
@@ -134,10 +181,23 @@ speaker:
     i2s_dout_pin: GPIO26
     sample_rate: 16000
     bits_per_sample: 16bit
-    channel: stereo             # 与 ES8388 时序匹配（I2S 标准 2 声道）
-    # 显式写出环形缓冲时长（= 上游缺省 500ms）：16kHz×2ch×2B×0.5s = 32000 字节，
-    # "滴"声 19200 字节 ⇒ 一次 play 装得下。改小它会让连点时的"滴"被截断。
+    # ★ channel 写 mono —— 与 speaker 内部实际生效的格式对齐。
+    #   speaker.h 的 audio_stream_info_ 缺省是 AudioStreamInfo(16bit, 1ch, 16kHz)，
+    #   而唯一能改写它的 set_audio_stream_info() 只有 media_player 会调 ⇒ 写 stereo 无效：
+    #   start_i2s_driver() 里 `channels==1 → slot_mode = I2S_SLOT_MODE_MONO` 会覆盖掉配置。
+    #   证据：上一轮日志 "Created ring buffer with size 16000" = 500ms×16kHz×2B×1ch。
+    channel: mono
+    # ★★ 关键修复：缺省 500ms 会在空闲 500ms 后把 speaker 任务杀掉并销毁 I2S 通道，
+    #   于是每轮第一下 play() 返回 0 字节（而且 play() 内的 200ms vTaskDelay 会卡住主循环，
+    #   状态机又跑在主循环里 ⇒ 越等越起不来）。never ⇒ 不调 set_timeout()，timeout_ 为空
+    #   ⇒ 任务一旦启动就常驻（持续写静音），state 恒为 RUNNING，触摸时立即写入。
+    timeout: never
+    # 环形缓冲 = buffer_duration × sample_rate × 2B × 1ch = 500ms × 16000 × 2 = 16000 字节
+    # "滴"声 = 300ms × 16000 × 2 = 9600 字节 ⇒ 一次 play 就装得下。
     buffer_duration: 500ms
+    # 把 codec 挂上：speaker 的 set_volume / set_mute 会转到 ES8388
+    # （音量 1.0 → DACCONTROL4/5 = 0x00 = 0dB，并在 setup 时解除静音）。
+    audio_dac: es8388_codec
 
 microphone:
   - platform: i2s_audio
@@ -150,17 +210,19 @@ microphone:
     channel: stereo              # ★ I2S 麦克风不支持 mono（上游 schema 明确禁止）
     # M3 只验证组件初始化；真正消费 mic 数据是 M4 语音助手的事
 
-# "滴"声发生器：1kHz 正弦、300ms、16kHz 采样、立体声 16bit PCM，带 10ms 淡入淡出防爆音。
-# ★ 注意：**不能**写 id(spk_out).play(pcm)（vector 版）—— 详见下方 lambda 内的名字隐藏说明。
+# "滴"声发生器：1kHz 正弦、300ms、16kHz、**单声道** 16bit PCM，带 10ms 淡入淡出防爆音。
+# ★★ 必须是单声道：speaker 内部的 stream info 是编译期默认的 1 声道（详见 speaker 段注释），
+#    喂立体声会让它按 2 字节一帧去解析 4 字节的立体声数据 ⇒ 音调/时长全错。
+# ★ 注意：**不能**写 id(spk_out).play(pcm)（vector 版）—— 见下方 lambda 内的名字隐藏说明。
 script:
   - id: play_beep
     then:
       - lambda: |-
           const int sr = 16000;
-          const int nsamp = sr * 3 / 10;        // 300ms
+          const int nsamp = sr * 3 / 10;        // 300ms = 4800 采样
           const int ramp = sr / 100;            // 10ms 包络
           std::vector<uint8_t> pcm;
-          pcm.reserve(nsamp * 4);
+          pcm.reserve(nsamp * 2);               // 单声道 16bit ⇒ 2 字节/采样 = 9600 字节
           for (int i = 0; i < nsamp; i++) {
             float env = 1.0f;
             if (i < ramp)
@@ -169,33 +231,37 @@ script:
               env = (float) (nsamp - i) / ramp;
             float s = sinf(2.0f * 3.14159265f * 1000.0f * i / sr) * 0.45f * env;
             int16_t v = (int16_t) (s * 32767);
-            uint8_t lo = (uint8_t) (v & 0xFF);
-            uint8_t hi = (uint8_t) ((v >> 8) & 0xFF);
-            pcm.push_back(lo); pcm.push_back(hi);   // L
-            pcm.push_back(lo); pcm.push_back(hi);   // R
+            pcm.push_back((uint8_t) (v & 0xFF));         // 小端：低字节
+            pcm.push_back((uint8_t) ((v >> 8) & 0xFF));  // 小端：高字节
           }
-          // ★★ 2026-10-01 编译修正（CI 报错 no matching function for play(std::vector<uint8_t>&)）
-          //   根因 = C++ 名字隐藏：i2s_audio_speaker.h 的 I2SAudioSpeakerBase 自己声明了
-          //       play(const uint8_t*, size_t, TickType_t)  ← 第 75 行
-          //       play(const uint8_t*, size_t)              ← 第 76 行
-          //     而没有 `using Speaker::play;` ⇒ 基类 speaker.h:50 的
-          //       play(const std::vector<uint8_t> &) 被隐藏，调不到。
-          //   ⇒ 只能按「指针 + 长度」调。签名直接取自编译器报错的候选列表。
-          //   两个行为已从 i2s_audio_speaker.cpp 实核：
-          //     ① 内部会自动 start()（state != RUNNING 时先启动）；
-          //     ② 走 write_without_replacement(..., write_partial=true) ⇒ 可能只写一部分，
-          //        所以要循环补齐。第 3 参 = 等环形缓冲腾空间的最长 ticks。
-          //   容量核算：环形缓冲 = buffer_duration(500ms) × 16kHz × 2ch × 2B = 32000 字节，
-          //             本段 PCM = 300ms × 16kHz × 2ch × 2B = 19200 字节 ⇒ 一次就能装下，
-          //             循环只是为快速连点时的兜底。
+          // ---- 播放 ----
+          // ★ 必须用「指针 + 长度」版，不能写 play(pcm)（vector 版）。
+          //   根因 = C++ 名字隐藏：i2s_audio_speaker.h 的具体类 I2SAudioSpeakerBase 自己声明了
+          //       play(const uint8_t*, size_t, TickType_t)   ← 第 75 行
+          //       play(const uint8_t*, size_t)               ← 第 76 行
+          //   且没有 `using Speaker::play;` ⇒ 基类 speaker.h:50 的
+          //       play(const std::vector<uint8_t> &) 被隐藏，调不到（已编译踩坑）。
+          //   签名直接取自编译器报错的候选列表。
+          // ★ 非阻塞铁律：本 lambda 跑在主循环任务里，而 speaker 的状态机在
+          //   I2SAudioSpeakerBase::loop() 里 —— 同一个任务。所以这里**绝不能等它**：
+          //   play() 一旦发现 state != RUNNING 就会 vTaskDelay(ticks)，把状态机一起冻住，
+          //   等多久都还是 0 字节（上一轮 BEEP written 0/19200 的真凶，顺带把 touchscreen
+          //   卡了 230~460ms）。所以：先无阻塞 start()，再以极小 ticks 尝试写。
+          //   timeout: never 已保证 speaker 常驻 RUNNING，正常情况下一次就写完 9600 字节。
+          // ★ 内部行为（i2s_audio_speaker.cpp 实核）：走
+          //   write_without_replacement(..., write_partial=true) ⇒ 允许部分写入 ⇒ 需要补齐循环。
+          if (!id(spk_out).is_running())
+            id(spk_out).start();          // 只置 COMMAND_START 事件位，非阻塞
           size_t sent = 0;
-          while (sent < pcm.size()) {
-            size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(200));
+          int guard = 0;
+          while (sent < pcm.size() && guard++ < 8) {
+            size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(2));
             if (n == 0)
-              break;   // 200ms 内一个字节都塞不进 → 放弃，防死循环
+              break;   // 环形缓冲暂时塞不进 → 放弃本次（下一下触摸会补上）
             sent += n;
           }
-          ESP_LOGI("m3", "BEEP written %u/%u bytes", (unsigned) sent, (unsigned) pcm.size());
+          ESP_LOGI("m3", "BEEP %u/%u bytes running=%d", (unsigned) sent,
+                   (unsigned) pcm.size(), (int) id(spk_out).is_running());
 
 display:
   - platform: mipi_dsi
