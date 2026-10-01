@@ -1,0 +1,285 @@
+# ============================================================
+# ESP32-P4 开发板 M1+M2+M3 —— 全功能验证（一烧全测）
+# ============================================================
+# 目标   : 一次烧录验证三件事：
+#            M1 显示：屏幕出图（四角标记+中心十字+外框）
+#            M2 触摸：手指点哪，黄点落在哪（ST7123, I2C 0x55）
+#            M3 音频：每次触摸播一声"滴"（ES8388 + PAM8302 功放）
+# 前置   : M1/M2 已通过。本文件 = touch_test.yaml + 音频，显示/触摸参数
+#          与已验证版本完全一致，未做任何改动。
+# 编译   : 单文件，无 secrets 依赖。CI 里选择 full_test.yaml
+# ★ 必读 : external_components 引入两个本地组件（推仓库时
+#          esphome/components/ 整个目录都要提交）：
+#            - mipi_dsi : 打过补丁（P4 rev3.0+ DPHY PLL 时钟源 abort）
+#            - st7123   : 触摸驱动，非上游组件，来自 M5 Tab5 工程
+# 硬件   : I2C  SDA=GPIO7  SCL=GPIO8 —— 触摸 0x55 / ES8388 0x10 共用
+#          触摸  TP_INT=GPIO20  TP_RST=GPIO13
+#          音频  I2S: MCLK=30 BCLK=29 LRCK=27 DOUT(播)=26 DIN(录)=28
+#                功放使能 PA_EN=GPIO31（PAM8302，厂商配置为高有效常开）
+# 通过   : ① 屏幕出现四角色块+十字 ② 黄点跟手 ③ 每次触摸有"滴"声
+# 排查   : 日志按顺序确认 —— I2C scan 出 0x55+0x10 → "Max Coord" 读到量程
+#          → ES8388 AudioCodec 初始化成功 → 触摸时 TOUCH 日志滚动
+# ============================================================
+substitutions:
+  name: p4-full-test
+
+esphome:
+  name: ${name}
+  # ★ 开机横幅（2026-09-30 加）：日志第一屏就能确认烧进去的是哪个配置。
+  on_boot:
+    priority: 600
+    then:
+      - logger.log:
+          format: "===== BOOT CONFIG = M1+M2+M3 full_test ====="
+          level: INFO
+  # ★ 不要在这里放长 delay —— on_boot 的 delay 会阻塞主循环，
+  #   显示刷新（update_interval）是主循环驱动的，会图形消失（M1 踩坑）
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [mipi_dsi, st7123]
+
+esp32:
+  variant: esp32p4
+  flash_size: 16MB
+  # 显式 360MHz：缺省取 400MHz 会报"实验性可能无法启动"警告
+  cpu_frequency: 360MHz
+  framework:
+    type: esp-idf
+
+# 片内 32MB hex PSRAM —— DSI 帧缓冲必须放这里
+psram:
+  mode: hex
+  speed: 200MHz
+
+# 片内 LDO 通道 3 输出 2.5V 供 MIPI DPHY
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+# ------------------------------------------------------------
+# 公共 I2C 总线（M2/M3 共用）
+# 原理图 V0.0.2：SDA=GPIO7，SCL=GPIO8
+# scan: true 启动时打印在线从机 —— 预期看到：
+#   0x55 = ST7123 触摸    0x10 = ES8388 音频编解码
+# （ES8388 地址脚 CE 接法决定 0x10/0x11，若 scan 报 0x11，
+#   在下方 audio_dac 段加 address: 0x11 即可）
+# ------------------------------------------------------------
+i2c:
+  - id: bus_a
+    sda: GPIO7
+    scl: GPIO8
+    frequency: 400kHz
+    scan: true
+
+# ------------------------------------------------------------
+# I2S 音频总线（M3 新增）
+# ES8388 是 I2S 从机，P4 做 master 出全时钟：MCLK=256×fs=4.096MHz
+# speaker(TX, GPIO26) 与 microphone(RX, GPIO28) 共用此总线，全双工
+# ------------------------------------------------------------
+i2s_audio:
+  - id: audio_bus
+    i2s_lrclk_pin: GPIO27
+    i2s_bclk_pin: GPIO29
+    i2s_mclk_pin: GPIO30
+
+output:
+  # 背光 PWM：GPIO11（M1 实测：HIGH → 亮，故不反相）
+  - platform: ledc
+    pin:
+      number: GPIO11
+      inverted: false
+    id: backlight_pwm
+    frequency: 1000Hz
+
+switch:
+  # 功放使能（PAM8302）：厂商配置为高电平使能、常开。
+  # 若触摸有日志但扬声器无声 → 尝试把 pin 加 inverted: true 再烧。
+  - platform: gpio
+    pin: GPIO31
+    id: pa_enable
+    name: "功放使能"
+    restore_mode: ALWAYS_ON
+
+# 触摸落点缓存（display lambda 每帧读取画黄点；-1 = 未触摸）
+globals:
+  - id: last_touch_x
+    type: int
+    restore_value: no
+    initial_value: '-1'
+  - id: last_touch_y
+    type: int
+    restore_value: no
+    initial_value: '-1'
+
+# ------------------------------------------------------------
+# M3 音频（官方 es8388 组件，地址默认 0x10）
+# 组件 setup 会完成整颗 codec 初始化：DAC 输出 LIN1/RIN1、
+# ADC 录音路径（ALC 全套 + LIN1/RIN1 输入）、解除静音；
+# DAC 音量寄存器上电默认 0x00 = 最大音量，无需再设。
+# ------------------------------------------------------------
+audio_dac:
+  - platform: es8388
+    id: es8388_codec
+    i2c_id: bus_a
+
+speaker:
+  - platform: i2s_audio
+    id: spk_out
+    i2s_audio_id: audio_bus
+    dac_type: external          # 2026.x 起 internal DAC 已被上游移除，必须 external
+    i2s_dout_pin: GPIO26
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    channel: stereo             # 与 ES8388 时序匹配（I2S 标准 2 声道）
+
+microphone:
+  - platform: i2s_audio
+    id: mic_in
+    i2s_audio_id: audio_bus
+    adc_type: external
+    i2s_din_pin: GPIO28
+    sample_rate: 16000
+    bits_per_sample: 16bit
+    channel: stereo              # ★ I2S 麦克风不支持 mono（上游 schema 明确禁止）
+    # M3 只验证组件初始化；真正消费 mic 数据是 M4 语音助手的事
+
+# "滴"声发生器：1kHz 正弦、300ms、16kHz 采样、立体声 16bit PCM，
+# 带 10ms 淡入淡出防爆音。speaker.play(vector) 为上游 speaker.h 公开接口。
+script:
+  - id: play_beep
+    then:
+      - lambda: |-
+          const int sr = 16000;
+          const int nsamp = sr * 3 / 10;        // 300ms
+          const int ramp = sr / 100;            // 10ms 包络
+          std::vector<uint8_t> pcm;
+          pcm.reserve(nsamp * 4);
+          for (int i = 0; i < nsamp; i++) {
+            float env = 1.0f;
+            if (i < ramp)
+              env = (float) i / ramp;
+            else if (i > nsamp - ramp)
+              env = (float) (nsamp - i) / ramp;
+            float s = sinf(2.0f * 3.14159265f * 1000.0f * i / sr) * 0.45f * env;
+            int16_t v = (int16_t) (s * 32767);
+            uint8_t lo = (uint8_t) (v & 0xFF);
+            uint8_t hi = (uint8_t) ((v >> 8) & 0xFF);
+            pcm.push_back(lo); pcm.push_back(hi);   // L
+            pcm.push_back(lo); pcm.push_back(hi);   // R
+          }
+          id(spk_out).play(pcm);
+
+display:
+  - platform: mipi_dsi
+    id: main_display
+    model: CUSTOM
+    dimensions:
+      width: 480
+      height: 800
+    # ★ M1 定论：rotation 270（顺时针 90°），走 C++ 软件路径。
+    #   DSI 模型被强制移除 swap_xy → 90/270 只能软件旋转；180 才走硬件。
+    rotation: 270
+    lanes: 2
+    # ★ M1 定论：必须显式写 RGB（CUSTOM 默认 BGR → 红蓝对调）
+    color_order: RGB
+    # 500Mbps / 36MHz / 时序均为 screen.py 板级实测值
+    lane_bit_rate: 500Mbps
+    pclk_frequency: 36MHz
+    hsync_back_porch: 40
+    hsync_pulse_width: 2
+    hsync_front_porch: 40
+    vsync_back_porch: 10
+    vsync_pulse_width: 2
+    vsync_front_porch: 180
+    reset_pin: GPIO21
+    # 复位 settle 已在 components/mipi_dsi/mipi_dsi.cpp 补丁：
+    # 低脉冲 20ms + 释放后 delay(120)，解决"按 RESET 无图"
+    show_test_card: false
+    auto_clear_enabled: true
+    update_interval: 100ms
+    lambda: |-
+      // 逻辑画布（旋转感知）：rotation 270 下为 800 x 480
+      int w = it.get_width();
+      int h = it.get_height();
+
+      // 四角标记：验证触摸↔显示坐标对齐
+      // 绿=左上  红=右上  蓝=左下  白=右下
+      it.filled_rectangle(0, 0, 40, 40, Color(0, 255, 0));
+      it.filled_rectangle(w - 40, 0, 40, 40, Color(255, 0, 0));
+      it.filled_rectangle(0, h - 40, 40, 40, Color(0, 0, 255));
+      it.filled_rectangle(w - 40, h - 40, 40, 40, Color(255, 255, 255));
+
+      // 中心十字 + 外框
+      int cx = w / 2, cy = h / 2;
+      it.line(cx - 60, cy, cx + 60, cy, Color(70, 70, 70));
+      it.line(cx, cy - 60, cx, cy + 60, Color(70, 70, 70));
+      it.rectangle(1, 1, w - 2, h - 2, Color(60, 60, 60));
+
+      // 触摸落点：黄实心圆 + 白圈
+      if (id(last_touch_x) >= 0 && id(last_touch_y) >= 0) {
+        it.filled_circle(id(last_touch_x), id(last_touch_y), 14, Color(255, 220, 0));
+        it.circle(id(last_touch_x), id(last_touch_y), 22, Color(255, 255, 255));
+      }
+    # ST7102 厂商初始化序列（还原自乐鑫官方 esp_lcd_st7102 组件）
+    init_sequence:
+      - [0x99, 0x71, 0x02, 0xA2]
+      - [0x99, 0x71, 0x02, 0xA3]
+      - [0x99, 0x71, 0x02, 0xA4]
+      - [0xA4, 0x31]
+      - [0xB0, 0x22, 0x57, 0x1E, 0x61, 0x2F, 0x57, 0x61]
+      - [0xB7, 0x64, 0x64]
+      - [0xBF, 0xB4, 0xB4]
+      - [0xC8, 0x00, 0x00, 0x0F, 0x1C, 0x34, 0x00, 0x60, 0x03, 0xA0, 0x06, 0x10, 0xFE, 0x06, 0x74, 0x03, 0x21, 0xC4, 0x00, 0x08, 0x00, 0x22, 0x46, 0x0F, 0x8F, 0x0A, 0x32, 0xF2, 0x0C, 0x42, 0x0C, 0xF3, 0x80, 0x00, 0xAB, 0xC0, 0x03, 0xC4]
+      - [0xC9, 0x00, 0x00, 0x0F, 0x1C, 0x34, 0x00, 0x60, 0x03, 0xA0, 0x06, 0x10, 0xFE, 0x06, 0x74, 0x03, 0x21, 0xC4, 0x00, 0x08, 0x00, 0x22, 0x46, 0x0F, 0x8F, 0x0A, 0x32, 0xF2, 0x0C, 0x42, 0x0C, 0xF3, 0x80, 0x00, 0xAB, 0xC0, 0x03, 0xC4]
+      - [0xD7, 0x10, 0x0C, 0x36, 0x19, 0x90, 0x90]
+      - [0xA3, 0x51, 0x03, 0x80, 0xCF, 0x44, 0x00, 0x00, 0x00, 0x00, 0x04, 0x78, 0x78, 0x00, 0x1A, 0x00, 0x45, 0x05, 0x00, 0x00, 0x00, 0x00, 0x46, 0x00, 0x00, 0x02, 0x20, 0x52, 0x00, 0x05, 0x00, 0x00, 0xFF]
+      - [0xA6, 0x02, 0x00, 0x24, 0x55, 0x35, 0x00, 0x38, 0x00, 0x78, 0x78, 0x00, 0x24, 0x55, 0x36, 0x00, 0x37, 0x00, 0x78, 0x78, 0x02, 0xAC, 0x51, 0x3A, 0x00, 0x00, 0x00, 0x78, 0x78, 0x03, 0xAC, 0x21, 0x00, 0x04, 0x00, 0x00, 0x78, 0x78, 0x3E, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00]
+      - [0xA7, 0x19, 0x19, 0x00, 0x64, 0x40, 0x07, 0x16, 0x40, 0x00, 0x04, 0x03, 0x78, 0x78, 0x00, 0x64, 0x40, 0x25, 0x34, 0x00, 0x00, 0x02, 0x01, 0x78, 0x78, 0x00, 0x64, 0x40, 0x4B, 0x5A, 0x00, 0x00, 0x02, 0x01, 0x78, 0x78, 0x00, 0x24, 0x40, 0x69, 0x78, 0x00, 0x00, 0x00, 0x00, 0x78, 0x78, 0x00, 0x44]
+      - [0xAC, 0x08, 0x0A, 0x11, 0x00, 0x13, 0x03, 0x1B, 0x18, 0x06, 0x1A, 0x19, 0x1B, 0x1B, 0x1B, 0x18, 0x1B, 0x09, 0x0B, 0x10, 0x02, 0x12, 0x01, 0x1B, 0x18, 0x06, 0x1A, 0x19, 0x1B, 0x1B, 0x1B, 0x18, 0x1B, 0xFF, 0x67, 0xFF, 0x67, 0x00]
+      - [0xAD, 0xCC, 0x40, 0x46, 0x11, 0x04, 0x78, 0x78]
+      - [0xE8, 0x30, 0x07, 0x00, 0x94, 0x94, 0x9C, 0x00, 0xE2, 0x04, 0x00, 0x00, 0x00, 0x00, 0xEF]
+      - [0xE7, 0x8B, 0x3C, 0x00, 0x0C, 0xF0, 0x5D, 0x00, 0x5D, 0x00, 0x5D, 0x00, 0x5D, 0x00, 0xFF, 0x00, 0x08, 0x7B, 0x00, 0x00, 0xC8, 0x6A, 0x5A, 0x08, 0x1A, 0x3C, 0x00, 0x81, 0x01, 0xCC, 0x01, 0x7F, 0xF0, 0x22]
+      - [0x35, 0x00]    # TE on（乐鑫原始序列末尾同款）
+    # ★ 不要写 0x11/0x29/延时 —— 组件自动追加，写两套会导致显示异常（踩坑）
+
+# ------------------------------------------------------------
+# 触摸（M2 已验证结构）
+# transform 推导：显示 270° 映射 px=ly, py=799-lx → 需 swap+X取反
+# calibration 不写 —— 组件首次触摸时从芯片 REG_GET_MAX_COORD 自动读量程
+# ------------------------------------------------------------
+touchscreen:
+  - platform: st7123
+    id: main_touch
+    i2c_id: bus_a
+    interrupt_pin: GPIO20
+    reset_pin: GPIO13
+    update_interval: never     # 配了中断就不轮询
+    transform:
+      swap_xy: true
+      mirror_x: true
+      mirror_y: false
+    on_touch:
+      # 触摸 → 更新黄点 + 播"滴"（一次触摸同时验证 M2 和 M3）
+      - lambda: |-
+          id(last_touch_x) = touch.x;
+          id(last_touch_y) = touch.y;
+          ESP_LOGI("m2", "TOUCH calc=(%d,%d) raw=(%d,%d)",
+                   touch.x, touch.y, touch.x_raw, touch.y_raw);
+      - script.execute: play_beep
+    on_release:
+      - lambda: |-
+          ESP_LOGI("m2", "RELEASE");
+
+# 背光（display 之后声明 → 屏幕 init 完成后才点亮）
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: backlight
+    name: "屏幕背光"
+    restore_mode: ALWAYS_ON
+
+logger:
+  level: DEBUG

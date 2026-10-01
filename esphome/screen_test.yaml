@@ -22,6 +22,14 @@ substitutions:
 
 esphome:
   name: ${name}
+  # ★ 开机横幅（2026-09-30 加）：日志第一屏就能确认烧进去的是哪个配置。
+  #   注意本文件是 M1 回归基线，正常只用来验证显示；跑触摸请用 touch_test.yaml。
+  on_boot:
+    priority: 600
+    then:
+      - logger.log:
+          format: "===== BOOT CONFIG = M1 screen_test (display only, NO touch) ====="
+          level: INFO
   # ★ 注意：不要在这里用长 delay 做测试序列 —— on_boot 的 delay 会阻塞
   #   主循环，而显示刷新（update_interval）是主循环驱动的，结果就是
   #   屏幕长时间得不到刷新 → 图形消失（已实测踩坑，见驱动来源说明.md）

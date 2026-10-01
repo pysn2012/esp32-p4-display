@@ -4,6 +4,20 @@ name: build esphome screentest
 # 触发条件
 on:
   workflow_dispatch:  # 手动触发（推荐）
+    # 手动触发时可选择编译哪个阶段的配置：
+    #   full_test.yaml   = M1+M2+M3 全功能验证（当前阶段，默认）
+    #   touch_test.yaml  = M2 触摸单独验证
+    #   screen_test.yaml = M1 点屏（回归基线）
+    inputs:
+      config:
+        description: '要编译的配置文件'
+        required: true
+        default: 'full_test.yaml'
+        type: choice
+        options:
+          - full_test.yaml
+          - touch_test.yaml
+          - screen_test.yaml
 
 jobs:
   compile-esphome:
@@ -35,8 +49,8 @@ jobs:
         run: |
           # 进入配置文件目录
           cd esphome
-          # 编译固件，生成bin文件
-          esphome compile screen_test.yaml
+          # 编译固件，生成bin文件（文件名来自 workflow_dispatch 的 config 输入）
+          esphome compile ${{ inputs.config }}
 
       # 步骤5：动态查找编译产物
       - name: 动态查找 firmware.bin
@@ -55,12 +69,12 @@ jobs:
       - name: 上传固件到 Artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: esphome-${{ github.sha }}
+          name: esphome-${{ inputs.config }}-${{ github.sha }}
           path: |
             ${{ steps.find_fw.outputs.OTA }}
             ${{ steps.find_fw.outputs.FACTORY }}
             ${{ steps.find_fw.outputs.ELF }}
-            esphome/screen_test.yaml
+            esphome/${{ inputs.config }}
           # 产物缺失时显式失败，避免静默上传空包
           if-no-files-found: error
           retention-days: 30

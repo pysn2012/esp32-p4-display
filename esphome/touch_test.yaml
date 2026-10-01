@@ -19,6 +19,16 @@ substitutions:
 
 esphome:
   name: ${name}
+  # ★ 开机横幅（2026-09-30 加）：日志第一屏就能确认烧进去的是哪个配置。
+  #   教训 —— 曾把 M1 的 screen_test 固件当成 M2 固件烧进去，整个日志里
+  #   没有任何 i2c / touchscreen 记录才发觉。有这一行就一眼可辨。
+  #   priority 600 = 组件 setup 完成、logger 已就绪之后（不改变启动时序）。
+  on_boot:
+    priority: 600
+    then:
+      - logger.log:
+          format: "===== BOOT CONFIG = M2 touch_test ====="
+          level: INFO
   # ★ 不要在这里放长 delay —— on_boot 的 delay 会阻塞主循环，
   #   而显示刷新（update_interval）是主循环驱动的，结果就是屏幕长时间
   #   得不到刷新 → 图形消失（M1 已实测踩坑，见 驱动来源说明.md）
