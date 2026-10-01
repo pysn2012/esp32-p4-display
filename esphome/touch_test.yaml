@@ -114,7 +114,18 @@ display:
     lane_bit_rate: 500Mbps
     pclk_frequency: 36MHz
     # color_depth 不写 = 默认 16bit（RGB565）
-    hsync_back_porch: 40
+    # ★★ 2026-10-01 实测定性后修正：hsync_back_porch 40 → 30
+    #   现象：整幅画面沿"逻辑 y 方向"（= 面板 H 方向）向下偏约 10px 并回绕 ——
+    #        屏幕最上沿那条约 10px 的一条，露出的是画面最底部的内容
+    #        （左下蓝/右下白方块的下沿，约 40px 方块的 1/4）。
+    #   原理：面板以自己的 back porch 相对 HSYNC 边沿开窗；我们的有效数据起点
+    #        = hsync_pulse(2) + hsync_back_porch(40) = 42 clk。数据来得偏晚
+    #        ⇒ 面板窗口先开 ⇒ 窗口最前 10 列抓到的是上一行的尾巴，
+    #        而我们的第 0 列落到窗口第 10 列 ⇒ 画面整体向 +px 平移 10px 并回绕。
+    #   方向：back porch 减小 = 数据提前 = 画面往"上"移；减小 10 正好抵消。
+    #   ⚠ 这组时序原本抄自乐鑫 esp_lcd_st7102.h 的 TL043WVV02-B1900A，
+    #     而那块是 480×272 面板，本板是 480×800 ⇒ 厂商值不通用，此处按实测反推。
+    hsync_back_porch: 30
     hsync_pulse_width: 2
     hsync_front_porch: 40
     vsync_back_porch: 10

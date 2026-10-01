@@ -188,7 +188,9 @@ display:
     # 500Mbps / 36MHz / 时序均为 screen.py 板级实测值
     lane_bit_rate: 500Mbps
     pclk_frequency: 36MHz
-    hsync_back_porch: 40
+    # ★★ 2026-10-01 修正：hsync_back_porch 40 → 30（画面整体向下偏 ~10px 并回绕）。
+    #   推导与实测证据详见 touch_test.yaml 同一段注释。
+    hsync_back_porch: 30
     hsync_pulse_width: 2
     hsync_front_porch: 40
     vsync_back_porch: 10
