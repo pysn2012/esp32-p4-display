@@ -62,10 +62,9 @@ esp_ldo:
 # ------------------------------------------------------------
 # 公共 I2C 总线（M2/M3 共用）
 # 原理图 V0.0.2：SDA=GPIO7，SCL=GPIO8
-# scan: true 启动时打印在线从机 —— 预期看到：
-#   0x55 = ST7123 触摸    0x10 = ES8388 音频编解码
-# （ES8388 地址脚 CE 接法决定 0x10/0x11，若 scan 报 0x11，
-#   在下方 audio_dac 段加 address: 0x11 即可）
+# ★★ 2026-10-01 实烧 scan 实测在线器件（这份就是权威结论，别再按缺省值猜）：
+#   0x11 = ES8388 音频编解码（★ 不是缺省 0x10！CE 脚接法决定 ⇒ 下方已显式写 address）
+#   0x28 = 待查    0x55 = ST7123 触摸    0x69 = BMI323（SDO 拉高）
 # ------------------------------------------------------------
 i2c:
   - id: bus_a
@@ -115,7 +114,8 @@ globals:
     initial_value: '-1'
 
 # ------------------------------------------------------------
-# M3 音频（官方 es8388 组件，地址默认 0x10）
+# M3 音频（官方 es8388 组件）
+# ★★ address 必须显式写 0x11 —— 实测 scan 只有 0x11 应答，组件缺省 0x10 会挂不上。
 # 组件 setup 会完成整颗 codec 初始化：DAC 输出 LIN1/RIN1、
 # ADC 录音路径（ALC 全套 + LIN1/RIN1 输入）、解除静音；
 # DAC 音量寄存器上电默认 0x00 = 最大音量，无需再设。
@@ -124,6 +124,7 @@ audio_dac:
   - platform: es8388
     id: es8388_codec
     i2c_id: bus_a
+    address: 0x11
 
 speaker:
   - platform: i2s_audio
@@ -190,7 +191,8 @@ display:
     pclk_frequency: 36MHz
     # ★★ 2026-10-01：改 porch 无效（实测无变化），恢复厂商值。
     #   列方向 ~10px 的刚性平移改由 components/mipi_dsi/mipi_dsi.cpp 的
-    #   X_SHIFT 软件对齐处理。完整推导见 touch_test.yaml 同一段注释。
+    #   X_SHIFT=10 软件对齐处理（例外：fill() / draw_pixels_at() 不覆盖，
+    #   见该文件 draw_pixel_at 内注释）。完整推导见 touch_test.yaml 同一段注释。
     hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40
@@ -249,9 +251,9 @@ display:
     # ★ 不要写 0x11/0x29/延时 —— 组件自动追加，写两套会导致显示异常（踩坑）
 
 # ------------------------------------------------------------
-# 触摸（M2 已验证结构）
+# 触摸（★ M2 已于 2026-10-01 实烧验证通过 → transform 三参数是定论，别再改）
 # transform 推导：显示 270° 映射 px=ly, py=799-lx → 需 swap+X取反
-# calibration 不写 —— 组件首次触摸时从芯片 REG_GET_MAX_COORD 自动读量程
+# calibration 不写 —— 组件首次触摸时从芯片 REG_GET_MAX_COORD 自动读量程（实测 480 800）
 # ------------------------------------------------------------
 touchscreen:
   - platform: st7123

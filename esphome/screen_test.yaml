@@ -135,7 +135,8 @@ display:
     # 时序全部来自已跑通的 MicroPython screen.py（板级实测有效）
     # ★★ 2026-10-01：改 porch 无效（实测无变化），恢复厂商值。
     #   列方向 ~10px 的刚性平移改由 components/mipi_dsi/mipi_dsi.cpp 的
-    #   X_SHIFT 软件对齐处理。完整推导见 touch_test.yaml 同一段注释。
+    #   X_SHIFT=10 软件对齐处理（例外：fill() / draw_pixels_at() 不覆盖，
+    #   见该文件 draw_pixel_at 内注释）。完整推导见 touch_test.yaml 同一段注释。
     hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40

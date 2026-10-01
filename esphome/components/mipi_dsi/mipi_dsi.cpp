@@ -299,17 +299,26 @@ void MipiDsi::draw_pixel_at(int x, int y, Color color) {
   if (!this->check_buffer_())
     return;
   // ★★★ 2026-10-01 面板列相位软件对齐（X_SHIFT）
-  //   实测现象：整幅画面沿"行内像素方向"(x_int，= 逻辑 y 方向)整体平移约 10px 并回绕 ——
-  //     屏幕最上沿那 10px 露出的是画面最底部的内容（约 40px 方块的 1/4）。
-  //   已实测排除：hsync_back_porch 40→30 画面完全不动。时序确实进了
-  //     esp_lcd_dpi_panel_config_t.video_timing（见本文件 84 行），说明面板的列窗口
-  //     由面板内部寄存器（初始化序列，抄自 480×272 的 TL043WVV02）决定，
-  //     我们的 H 时序不是这个偏移的杠杆。⇒ 只能做软件对齐。
-  //   原理：面板把我们的第 j 列显示在它的第 (j + X_SHIFT) 列，于是把每个像素写到
-  //     (x - X_SHIFT) mod width_，面板再把它右移 X_SHIFT 后就正好还原（含回绕）。
-  //   注：ESPHome 2026.9.0 里 fill/clear/filled_rectangle/line/circle 最终都调用
-  //     draw_pixel_at，所以只改这一处即可全局生效（已核 display.cpp）。
-  //   X_SHIFT = 0 即关闭补偿；若画面反而偏得更多，把它改成相反数。
+  //   【现象】整幅画面沿**逻辑 y 方向**（= 本函数 rotation 270 分支之后的 x，
+  //     即帧缓冲的行内像素方向）整体平移约 10px，并且是**回绕**的：
+  //     屏幕最上沿那 10px 露出的是画面最底部的内容（40px 角块下沿 = 1/4 块）。
+  //   【为什么轴向就是 x】270° ⇒ swap 之后 x = 逻辑 ly、y = 799 − 逻辑 lx，
+  //     最后 pos = y * width_ + x ⇒ 行内索引 x 就是用户视角的"竖直方向"。
+  //     触摸侧独立佐证：用户"竖直"= 触摸芯片 x（480 轴）。两路一致。
+  //   【为什么只能软件修】实测 hsync_back_porch 40→30 重烧，画面**完全不动**；
+  //     已确认 porch 确实进了 esp_lcd_dpi_panel_config_t.video_timing（见本文件 84 行），
+  //     且整帧走的是 write_to_display_ 的对齐整幅快路径（x_offset==0 && x_pad==0），
+  //     排除了"非对齐矩形拷贝"这一类原因。⇒ 这是面板侧的固定列相位。
+  //   【原理】面板把我们的第 c 列显示到它的第 (c + X_SHIFT) mod width_ 列，
+  //     故把像素写到 x' = (x − X_SHIFT) mod width_，面板再右移 X_SHIFT 即还原（含回绕）。
+  //   【覆盖面】display.cpp 的 filled_rectangle / horizontal_line / line / circle /
+  //     filled_circle / rectangle 都最终经 draw_pixel_at ⇒ 只改这一处即全局生效。
+  //     两个已核例外（本补偿**不**覆盖）：
+  //       ① MipiDsi::fill() 被本文件重写为直接 std::fill_n —— 整屏同色，
+  //          平移不影响观感；clear() 与"占满整屏的 filled_rectangle"走它。
+  //       ② draw_pixels_at()（贴图/位图路径）绕过 draw_pixel_at ⇒ M4 显示图片时
+  //          要另行补偿，或改为逐像素绘制。
+  //   【调法】X_SHIFT = 0 关闭补偿；方向反了（偏得更多）改成 -10；按实测残差微调。
   static constexpr int X_SHIFT = 10;
   x = (x - X_SHIFT + static_cast<int>(this->width_)) % static_cast<int>(this->width_);
   size_t pos = (y * this->width_) + x;

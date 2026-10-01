@@ -123,9 +123,13 @@ display:
     #        说明面板的列窗口由面板内部寄存器（初始化序列，抄自 480×272 的 TL043WVV02）决定，
     #        我们的 H 时序不是这个偏移的杠杆 ⇒ 改 porch 无用，此处恢复厂商值。
     #   处置：改做软件对齐 —— components/mipi_dsi/mipi_dsi.cpp 的 MipiDsi::draw_pixel_at
-    #        里加了 X_SHIFT=10 的按行回绕偏移。ESPHome 2026.9.0 里 fill/clear/
-    #        filled_rectangle/line/circle 最终都调用 draw_pixel_at，故一处即全局生效（已核）。
-    #        X_SHIFT=0 可关闭；若画面反而偏得更多，把它改成相反数。
+    #        里加了 X_SHIFT=10 的按行回绕偏移。display.cpp 的绘制原语
+    #        （filled_rectangle/line/circle/rectangle/filled_circle）都最终经 draw_pixel_at，
+    #        故一处即全局生效（已核）。
+    #        两个已核例外：① MipiDsi::fill() 被重写为直接 std::fill_n —— 整屏同色，
+    #        平移不影响观感（clear() 与"占满整屏的 filled_rectangle"走它）；
+    #        ② draw_pixels_at()（贴图/位图）绕过 draw_pixel_at —— M4 显示图片时要另行补偿。
+    #        X_SHIFT=0 可关闭；若画面反而偏得更多，把它改成相反数（-10）。
     hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40
