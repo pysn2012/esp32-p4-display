@@ -135,6 +135,9 @@ speaker:
     sample_rate: 16000
     bits_per_sample: 16bit
     channel: stereo             # 与 ES8388 时序匹配（I2S 标准 2 声道）
+    # 显式写出环形缓冲时长（= 上游缺省 500ms）：16kHz×2ch×2B×0.5s = 32000 字节，
+    # "滴"声 19200 字节 ⇒ 一次 play 装得下。改小它会让连点时的"滴"被截断。
+    buffer_duration: 500ms
 
 microphone:
   - platform: i2s_audio
@@ -147,8 +150,8 @@ microphone:
     channel: stereo              # ★ I2S 麦克风不支持 mono（上游 schema 明确禁止）
     # M3 只验证组件初始化；真正消费 mic 数据是 M4 语音助手的事
 
-# "滴"声发生器：1kHz 正弦、300ms、16kHz 采样、立体声 16bit PCM，
-# 带 10ms 淡入淡出防爆音。speaker.play(vector) 为上游 speaker.h 公开接口。
+# "滴"声发生器：1kHz 正弦、300ms、16kHz 采样、立体声 16bit PCM，带 10ms 淡入淡出防爆音。
+# ★ 注意：**不能**写 id(spk_out).play(pcm)（vector 版）—— 详见下方 lambda 内的名字隐藏说明。
 script:
   - id: play_beep
     then:
@@ -171,7 +174,28 @@ script:
             pcm.push_back(lo); pcm.push_back(hi);   // L
             pcm.push_back(lo); pcm.push_back(hi);   // R
           }
-          id(spk_out).play(pcm);
+          // ★★ 2026-10-01 编译修正（CI 报错 no matching function for play(std::vector<uint8_t>&)）
+          //   根因 = C++ 名字隐藏：i2s_audio_speaker.h 的 I2SAudioSpeakerBase 自己声明了
+          //       play(const uint8_t*, size_t, TickType_t)  ← 第 75 行
+          //       play(const uint8_t*, size_t)              ← 第 76 行
+          //     而没有 `using Speaker::play;` ⇒ 基类 speaker.h:50 的
+          //       play(const std::vector<uint8_t> &) 被隐藏，调不到。
+          //   ⇒ 只能按「指针 + 长度」调。签名直接取自编译器报错的候选列表。
+          //   两个行为已从 i2s_audio_speaker.cpp 实核：
+          //     ① 内部会自动 start()（state != RUNNING 时先启动）；
+          //     ② 走 write_without_replacement(..., write_partial=true) ⇒ 可能只写一部分，
+          //        所以要循环补齐。第 3 参 = 等环形缓冲腾空间的最长 ticks。
+          //   容量核算：环形缓冲 = buffer_duration(500ms) × 16kHz × 2ch × 2B = 32000 字节，
+          //             本段 PCM = 300ms × 16kHz × 2ch × 2B = 19200 字节 ⇒ 一次就能装下，
+          //             循环只是为快速连点时的兜底。
+          size_t sent = 0;
+          while (sent < pcm.size()) {
+            size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(200));
+            if (n == 0)
+              break;   // 200ms 内一个字节都塞不进 → 放弃，防死循环
+            sent += n;
+          }
+          ESP_LOGI("m3", "BEEP written %u/%u bytes", (unsigned) sent, (unsigned) pcm.size());
 
 display:
   - platform: mipi_dsi
