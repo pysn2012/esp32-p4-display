@@ -18,15 +18,33 @@
 #                功放使能 PA_EN=GPIO31（PAM8302，厂商配置为高有效常开）
 # 通过   : ① 屏幕出现四角色块+十字 ② 黄点跟手 ③ 每次触摸有"滴"声
 # 排查   : 日志按顺序确认 ——
-#          [I][m3]: ES8388 DAC output BOTH enable = OK   ← 线输出使能成功（★ 新增，关键）
-#          [I][m3]: speaker start requested              ← 常驻音频流已请求（★ 新增）
-#          [D][i2s_audio.speaker.std]: ...（不再出现 Stopped）
-#          [I][m3]: BEEP 9600/9600 bytes running=1       ← 每次触摸（★ 关键：必须是 9600/9600 + running=1）
-#          另有 I2C scan 出 0x11+0x55+0x69、"Max Coord: 480 800"、触摸时 TOUCH 日志滚动
+#          [I][m3]: ES8388 DAC output BOTH enable = OK   ← 线输出使能成功
+#          [I][m3]: ES8388 reg 0x04 = 0x3C / 0x17 = 0x18 / 0x19 = 0x20 / 0x27 = 0x90 /
+#                   0x2A = 0x90 / 0x2B = 0x80 / 0x2E~0x31 = 0x1E   ← 寄存器回读（第三轮新增）
+#          [I][m3]: speaker start requested
+#          [I][diag]: PA=HIGH 或 PA=LOW  ← 本次触摸用的功放极性（第三轮新增）
+#          [I][m3]: BEEP 12800/12800 bytes running=1      ← 每次触摸
+#          另有 I2C scan 出 0x11+0x28+0x55+0x69、"Max Coord: 480 800"、TOUCH 日志滚动
 # ============================================================
-# ★★ 2026-10-01 第二轮（上一轮"点了没声音"）已定位的三个独立缺陷，全在本文件修掉：
+# ★★ 2026-10-01 第三轮（第二轮修完仍无声）—— 已把所有软件可控变量逐条核对/试掉：
+#   ① ES8388 配置已与三份 known-good 初始化序列逐寄存器对齐：
+#      ESPHome es8388.cpp + ESP-ADF es8388.c + M5Stack ES8388 模块示例。
+#      关键位逐位核对（ES8388S datasheet 配置寄存器总表）：
+#        0x17 = 0x18 → DACWL[5:3]=011 (16bit) + DACFORMAT[2:0]=000 (I2S)   ✔
+#        0x19  默认 0x22，DACMute = bit2(0x04)；码里写 0x20 → bit2=0 未静音 ✔
+#        0x04  默认 0xC0 = PdnDACL+PdnDACR 都掉电、LOUT/ROUT 关闭；
+#              DAC_OUTPUT_BOTH=0x3C 正好清掉两个 PDN 并打开 LOUT/ROUT   ✔
+#        0x2E~0x31 = 0x1E 输出音量（★ 0x00 是最小音量，不是 0dB）        ✔
+#   ② 数字链路已由日志证通：BEEP 12800/12800 + running=1 + 全程无 Stopped
+#      （任务若写 I2S 失败会打 ERROR 并退出 ⇒ 没退出就说明 I2S 写入正常）。
+#   ③ 于是本轮只剩一个由软件控制、且从未实测过的变量：**PA_EN(GPIO31) 极性**。
+#      → 改成每触摸一次翻转一次（PA=HIGH / PA=LOW 交替），一次烧录同时试两种极性。
+#      → 另外加了 11 个关键寄存器的回读日志（写入 OK ≠ 值真落进芯片）。
+#   ★ 若两种极性都无声：软件侧已无可查项，问题在 ES8388 模拟输出之后（见 switch 段注释）。
+# ============================================================
+# ★★ 2026-10-01 第二轮（"点了没声音"）修掉的三个缺陷（保留备查）：
 #   ① ES8388 线输出从未使能 —— 上游 es8388.cpp 的 setup() 全文不写 0x04 DACPOWER
-#      与 0x2E~0x31（输出音量，复位 0x00 = -30dB），唯一会写它们的是 select 实体，
+#      与 0x2E~0x31（输出音量，复位 0x00 = 最小音量），唯一会写它们的是 select 实体，
 #      我们没配 ⇒ 信号根本出不到 PAM8302。→ on_boot 调 set_dac_output(DAC_OUTPUT_BOTH)。
 #   ② speaker 缺省 timeout 500ms：空闲 500ms 后任务自杀并把 I2S 通道销毁，
 #      而 play() 见 state≠RUNNING 会 vTaskDelay(200ms)——状态机却在同类的主循环里，
@@ -34,7 +52,7 @@
 #      → timeout: never + on_boot 常驻 start()。
 #   ③ speaker 内部 stream info 是编译期默认 AudioStreamInfo(16bit,1ch,16kHz)，
 #      YAML 的 channel 对 speaker 无效（环缓 16000B = 单声道佐证）⇒ 立体声 PCM 是错的。
-#      → 改喂单声道 PCM（9600B），channel 写 mono 与实际一致。
+#      → 改喂单声道 PCM，channel 写 mono 与实际一致。
 # ============================================================
 substitutions:
   name: p4-full-test
@@ -57,7 +75,7 @@ esphome:
         - lambda: |-
             // ★★ 2026-10-01：上游 es8388 组件的 setup() 从不调用 set_dac_output()，
             //   寄存器 0x04 (DACPOWER，线输出使能) 与 0x2E~0x31 (LOUT1/ROUT1/LOUT2/ROUT2
-            //   输出音量，复位值 0x00 = -30dB) 一直停在复位值 ⇒ 模拟信号出不到 PAM8302。
+            //   输出音量，复位值 0x00 = 最小音量（不是 0dB）) 一直停在复位值 ⇒ 模拟信号出不到 PAM8302。
             //   唯一会写这两个的路径是 es8388 的 select 实体（我们没配），所以必须在这里补。
             //   DAC_OUTPUT_BOTH 一次把四路音量置 0x1E(0dB) 并把 DACPOWER 写成 0x3C。
             //   命名空间 esphome::es8388 与枚举值取自 components/es8388/es8388.h（已实核）。
@@ -70,6 +88,33 @@ esphome:
             //   于是触摸时 play() 不再走 vTaskDelay(200ms)、不会再返回 0 字节。
             id(spk_out).start();
             ESP_LOGI("m3", "speaker start requested");
+
+            // ★★★ 2026-10-01 第三轮：关键寄存器回读。
+            //   "I2C 写入返回 OK" ≠ "值真的落进芯片"。逐位核对 ES8388S 寄存器表后，
+            //   下面这几条是本项目出声的必经之路，回读值必须与注释里的期望值一致。
+            //   ★ 前三条是"整颗 codec 到底有没有在工作"的根基，任一不对 ⇒ 全静音：
+            //     0x00 = 0x12  ChipControl1：VMIDSEL[1:0]=10(500kΩ)、SameFs=1
+            //                  （与 ESP-ADF 逐字节同值；VMIDSEL=00 ⇒ 模拟基准分压器关闭）
+            //     0x02 = 0x00  CHIPPOWER：0x00 = 全块正常上电
+            //                  （setup 末尾写完 0xF0 又回写 0x00；若回读 0xF0 ⇒ 时钟被门控，静音）
+            //     0x04 = 0x3C  线输出 + 左右 DAC 电源 (DAC_OUTPUT_BOTH)
+            //     0x17 = 0x18  DACWL=011(16bit) + DACFORMAT=000(I2S)
+            //     0x18 = 0x02  DACFsRatio=256（MCLK 4.096MHz ÷ 256 = 16kHz）
+            //     0x19 = 0x20  bit2 DACMute = 0 ⇒ 未静音；bit5 DACSoftRamp = 1
+            //     0x26 = 0x00  混音器输入选择 LMIXSEL/RMIXSEL
+            //     0x27 = 0x90  bit7 LD2LO 使能，左 DAC → 左混音器 0dB
+            //     0x2A = 0x90  同上，右声道
+            //     0x2B = 0x80  slrck：ADC/DAC 共用 LRCK
+            //     0x2E~0x31 = 0x1E  LOUT1/ROUT1/LOUT2/ROUT2 输出音量（0x00 = 最小，别留 0）
+            const uint8_t chk[] = {0x00, 0x02, 0x04, 0x17, 0x18, 0x19, 0x26, 0x27, 0x2A, 0x2B, 0x2E, 0x2F, 0x30, 0x31};
+            for (uint8_t r : chk) {
+              uint8_t v = 0;
+              bool ok = id(es8388_codec).read_byte(r, &v);
+              if (ok)
+                ESP_LOGI("m3", "ES8388 reg 0x%02X = 0x%02X", r, v);
+              else
+                ESP_LOGW("m3", "ES8388 reg 0x%02X READ FAIL", r);
+            }
   # ★ 注意：set_audio_stream_info 只在 media_player 里被调用，普通 i2s_audio speaker 的
   #   stream info 用的是 speaker.h 里的编译期默认值 (16bit / 1ch / 16kHz) ——
   #   所以本文件所有 PCM 必须是「单声道 16bit 16kHz」，见下面 play_beep。
@@ -133,13 +178,16 @@ output:
     frequency: 1000Hz
 
 switch:
-  # 功放使能（PAM8302）：厂商配置为高电平使能、常开。
-  # ★ 若这次改完仍然无声，按下面顺序排查（软件侧三条已全部修掉，剩下的基本都是硬件）：
-  #   1) 把 pin: 改成 { number: GPIO31, inverted: true } 重烧 —— PA 极性是唯一还没实测过的软件项
-  #   2) 看日志 [I][m3]: BEEP 9600/9600 bytes running=1 是否出现：
-  #        running=0       → speaker 没起来（timeout: never 没生效 / 配置没真推上去）
-  #        9600 打满仍无声 → 数字链路全通，问题在 PA / ES8388 模拟输出 / 喇叭接线
-  #   3) 用万用表量 GPIO31 静态电平（应为高）、PAM8302 的 VDD 与喇叭两端有无直流偏置 1/2VDD
+  # 功放使能（PAM8302）。★ 2026-10-01 第三轮起：本开关不再固定常开，
+  #   而是由 on_touch 里的极性扫描每次触摸翻转一次（HIGH ↔ LOW），
+  #   用来在一次烧录内同时试出两种极性。日志里紧跟 TOUCH 的那行 PA=HIGH/LOW 就是本次极性。
+  #   restore_mode 仍留 ALWAYS_ON：它只决定开机初始电平（HIGH），随后由扫描接管。
+  # ★ 若两种极性都无声 ⇒ PA 不是原因，按下面顺序继续查硬件：
+  #   1) 板上有没有耳机座？耳机座的机械开关会切断功放输出（最容易被忽略的一条）
+  #   2) 喇叭是否真的接在 JST/端子上，量一下喇叭两端电阻（应为 4~8Ω，开路=没接）
+  #   3) 量 ES8388 的 LOUT1/ROUT1 静态直流：应约 VDD/2（≈1.65V）。
+  #      为 0V 或悬浮 ⇒ codec 模拟输出没起来；有 1.65V ⇒ codec 已输出，问题在功放/喇叭侧
+  #   4) 量 PAM8302 的 VDD 与 SD 脚电平
   - platform: gpio
     pin: GPIO31
     id: pa_enable
@@ -164,7 +212,7 @@ globals:
 # ADC 录音路径（ALC 全套 + LIN1/RIN1）、解除 DAC 静音（DACCONTROL3 bit2）。
 # ★★ 但它「不写」两处输出侧寄存器，必须我们自己补（见上面 on_boot 的 -100）：
 #     0x04  DACPOWER —— 线输出使能（LOUT1/ROUT1/LOUT2/ROUT2）
-#     0x2E~0x31      —— 输出音量，复位 0x00 = -30dB（★ 不是 0dB）
+#     0x2E~0x31      —— 输出音量，复位 0x00 = 最小音量（★ 不是 0dB）
 #   （DACCONTROL4/5 数字音量确实是 0x00 = 0dB，别和上面那条混淆）
 # ------------------------------------------------------------
 audio_dac:
@@ -193,7 +241,7 @@ speaker:
     #   ⇒ 任务一旦启动就常驻（持续写静音），state 恒为 RUNNING，触摸时立即写入。
     timeout: never
     # 环形缓冲 = buffer_duration × sample_rate × 2B × 1ch = 500ms × 16000 × 2 = 16000 字节
-    # "滴"声 = 300ms × 16000 × 2 = 9600 字节 ⇒ 一次 play 就装得下。
+    # "滴"声 = 400ms × 16000 × 2 = 12800 字节 ⇒ 一次 play 就装得下。
     buffer_duration: 500ms
     # 把 codec 挂上：speaker 的 set_volume / set_mute 会转到 ES8388
     # （音量 1.0 → DACCONTROL4/5 = 0x00 = 0dB，并在 setup 时解除静音）。
@@ -210,26 +258,28 @@ microphone:
     channel: stereo              # ★ I2S 麦克风不支持 mono（上游 schema 明确禁止）
     # M3 只验证组件初始化；真正消费 mic 数据是 M4 语音助手的事
 
-# "滴"声发生器：1kHz 正弦、300ms、16kHz、**单声道** 16bit PCM，带 10ms 淡入淡出防爆音。
+# "滴"声发生器：1kHz 正弦、**400ms**、16kHz、**单声道** 16bit PCM，带 20ms 淡入淡出防爆音。
 # ★★ 必须是单声道：speaker 内部的 stream info 是编译期默认的 1 声道（详见 speaker 段注释），
 #    喂立体声会让它按 2 字节一帧去解析 4 字节的立体声数据 ⇒ 音调/时长全错。
+# ★ 2026-10-01 第三轮：幅度 0.45→0.80、时长 300ms→400ms。排查阶段要"只要有一点点声音就能听见"，
+#   不要因为音量太小而误判成完全无声。400ms 单声道 = 12800 字节 < 环缓 16000 字节，仍一次装得下。
 # ★ 注意：**不能**写 id(spk_out).play(pcm)（vector 版）—— 见下方 lambda 内的名字隐藏说明。
 script:
   - id: play_beep
     then:
       - lambda: |-
           const int sr = 16000;
-          const int nsamp = sr * 3 / 10;        // 300ms = 4800 采样
-          const int ramp = sr / 100;            // 10ms 包络
+          const int nsamp = sr * 4 / 10;        // 400ms = 6400 采样
+          const int ramp = sr / 50;             // 20ms 包络
           std::vector<uint8_t> pcm;
-          pcm.reserve(nsamp * 2);               // 单声道 16bit ⇒ 2 字节/采样 = 9600 字节
+          pcm.reserve(nsamp * 2);               // 单声道 16bit ⇒ 2 字节/采样 = 12800 字节
           for (int i = 0; i < nsamp; i++) {
             float env = 1.0f;
             if (i < ramp)
               env = (float) i / ramp;
             else if (i > nsamp - ramp)
               env = (float) (nsamp - i) / ramp;
-            float s = sinf(2.0f * 3.14159265f * 1000.0f * i / sr) * 0.45f * env;
+            float s = sinf(2.0f * 3.14159265f * 1000.0f * i / sr) * 0.80f * env;
             int16_t v = (int16_t) (s * 32767);
             pcm.push_back((uint8_t) (v & 0xFF));         // 小端：低字节
             pcm.push_back((uint8_t) ((v >> 8) & 0xFF));  // 小端：高字节
@@ -247,7 +297,7 @@ script:
           //   play() 一旦发现 state != RUNNING 就会 vTaskDelay(ticks)，把状态机一起冻住，
           //   等多久都还是 0 字节（上一轮 BEEP written 0/19200 的真凶，顺带把 touchscreen
           //   卡了 230~460ms）。所以：先无阻塞 start()，再以极小 ticks 尝试写。
-          //   timeout: never 已保证 speaker 常驻 RUNNING，正常情况下一次就写完 9600 字节。
+          //   timeout: never 已保证 speaker 常驻 RUNNING，正常情况下一次就写完 12800 字节。
           // ★ 内部行为（i2s_audio_speaker.cpp 实核）：走
           //   write_without_replacement(..., write_partial=true) ⇒ 允许部分写入 ⇒ 需要补齐循环。
           if (!id(spk_out).is_running())
@@ -363,6 +413,25 @@ touchscreen:
           id(last_touch_y) = touch.y;
           ESP_LOGI("m2", "TOUCH calc=(%d,%d) raw=(%d,%d)",
                    touch.x, touch.y, touch.x_raw, touch.y_raw);
+      # ★★★ 2026-10-01 第三轮：PA 极性扫描（一次烧录同时试两种极性）
+      #   背景：codec 寄存器已逐位核对（es8388 配置与 ESPHome/ADF/M5Stack 三份
+      #   known-good 初始化序列一致），数字链路也已证通（BEEP 12800/12800 + running=1 +
+      #   全程无 Stopped）。剩下唯一由软件控制、且从未实测过的变量就是 PA_EN(GPIO31) 极性。
+      #   做法：每摸一次翻转一次 PA 电平，下一行紧跟本次电平日志，再播"滴"。
+      #   判读：只听其中一半（HIGH 或 LOW）会响 ⇒ 极性确定；
+      #         两种都无声 ⇒ PA 极性不是原因，问题在 ES8388 之后的模拟通路/接线/喇叭。
+      - lambda: |-
+          static bool pa_high = false;
+          static uint32_t n = 0;
+          n++;
+          pa_high = !pa_high;
+          if (pa_high) {
+            id(pa_enable).turn_on();
+          } else {
+            id(pa_enable).turn_off();
+          }
+          ESP_LOGI("diag", "PA=%s  (#%u)  ---- 若紧接着那声滴能听到，极性就是它",
+                   pa_high ? "HIGH" : "LOW", (unsigned) n);
       - script.execute: play_beep
     on_release:
       - lambda: |-
