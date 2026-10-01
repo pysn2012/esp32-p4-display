@@ -114,18 +114,19 @@ display:
     lane_bit_rate: 500Mbps
     pclk_frequency: 36MHz
     # color_depth 不写 = 默认 16bit（RGB565）
-    # ★★ 2026-10-01 实测定性后修正：hsync_back_porch 40 → 30
-    #   现象：整幅画面沿"逻辑 y 方向"（= 面板 H 方向）向下偏约 10px 并回绕 ——
-    #        屏幕最上沿那条约 10px 的一条，露出的是画面最底部的内容
+    # ★★ 2026-10-01 两轮实测结论：面板列方向有恒定 ~10px 刚性平移
+    #   现象：整幅画面沿"逻辑 y 方向"(= 面板行内像素方向 x_int)整体下移约 10px 并回绕 ——
+    #        屏幕最上沿那 10px 露出的是画面最底部的内容
     #        （左下蓝/右下白方块的下沿，约 40px 方块的 1/4）。
-    #   原理：面板以自己的 back porch 相对 HSYNC 边沿开窗；我们的有效数据起点
-    #        = hsync_pulse(2) + hsync_back_porch(40) = 42 clk。数据来得偏晚
-    #        ⇒ 面板窗口先开 ⇒ 窗口最前 10 列抓到的是上一行的尾巴，
-    #        而我们的第 0 列落到窗口第 10 列 ⇒ 画面整体向 +px 平移 10px 并回绕。
-    #   方向：back porch 减小 = 数据提前 = 画面往"上"移；减小 10 正好抵消。
-    #   ⚠ 这组时序原本抄自乐鑫 esp_lcd_st7102.h 的 TL043WVV02-B1900A，
-    #     而那块是 480×272 面板，本板是 480×800 ⇒ 厂商值不通用，此处按实测反推。
-    hsync_back_porch: 30
+    #   已实测排除（关键）：hsync_back_porch 40→30 画面**完全不动**。
+    #        时序确实进了 esp_lcd_dpi_panel_config_t.video_timing（mipi_dsi.cpp 84 行，已核），
+    #        说明面板的列窗口由面板内部寄存器（初始化序列，抄自 480×272 的 TL043WVV02）决定，
+    #        我们的 H 时序不是这个偏移的杠杆 ⇒ 改 porch 无用，此处恢复厂商值。
+    #   处置：改做软件对齐 —— components/mipi_dsi/mipi_dsi.cpp 的 MipiDsi::draw_pixel_at
+    #        里加了 X_SHIFT=10 的按行回绕偏移。ESPHome 2026.9.0 里 fill/clear/
+    #        filled_rectangle/line/circle 最终都调用 draw_pixel_at，故一处即全局生效（已核）。
+    #        X_SHIFT=0 可关闭；若画面反而偏得更多，把它改成相反数。
+    hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40
     vsync_back_porch: 10

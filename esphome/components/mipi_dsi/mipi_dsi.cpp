@@ -298,6 +298,20 @@ void MipiDsi::draw_pixel_at(int x, int y, Color color) {
   }
   if (!this->check_buffer_())
     return;
+  // ★★★ 2026-10-01 面板列相位软件对齐（X_SHIFT）
+  //   实测现象：整幅画面沿"行内像素方向"(x_int，= 逻辑 y 方向)整体平移约 10px 并回绕 ——
+  //     屏幕最上沿那 10px 露出的是画面最底部的内容（约 40px 方块的 1/4）。
+  //   已实测排除：hsync_back_porch 40→30 画面完全不动。时序确实进了
+  //     esp_lcd_dpi_panel_config_t.video_timing（见本文件 84 行），说明面板的列窗口
+  //     由面板内部寄存器（初始化序列，抄自 480×272 的 TL043WVV02）决定，
+  //     我们的 H 时序不是这个偏移的杠杆。⇒ 只能做软件对齐。
+  //   原理：面板把我们的第 j 列显示在它的第 (j + X_SHIFT) 列，于是把每个像素写到
+  //     (x - X_SHIFT) mod width_，面板再把它右移 X_SHIFT 后就正好还原（含回绕）。
+  //   注：ESPHome 2026.9.0 里 fill/clear/filled_rectangle/line/circle 最终都调用
+  //     draw_pixel_at，所以只改这一处即可全局生效（已核 display.cpp）。
+  //   X_SHIFT = 0 即关闭补偿；若画面反而偏得更多，把它改成相反数。
+  static constexpr int X_SHIFT = 10;
+  x = (x - X_SHIFT + static_cast<int>(this->width_)) % static_cast<int>(this->width_);
   size_t pos = (y * this->width_) + x;
   switch (this->color_depth_) {
     case display::COLOR_BITNESS_565: {

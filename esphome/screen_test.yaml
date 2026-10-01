@@ -133,9 +133,10 @@ display:
     pclk_frequency: 36MHz
     # color_depth 不写 = 默认 16bit（RGB565），帧缓冲更省
     # 时序全部来自已跑通的 MicroPython screen.py（板级实测有效）
-    # ★★ 2026-10-01 修正：hsync_back_porch 40 → 30（画面整体向下偏 ~10px 并回绕）。
-    #   推导与实测证据详见 touch_test.yaml 同一段注释。
-    hsync_back_porch: 30
+    # ★★ 2026-10-01：改 porch 无效（实测无变化），恢复厂商值。
+    #   列方向 ~10px 的刚性平移改由 components/mipi_dsi/mipi_dsi.cpp 的
+    #   X_SHIFT 软件对齐处理。完整推导见 touch_test.yaml 同一段注释。
+    hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40
     vsync_back_porch: 10
