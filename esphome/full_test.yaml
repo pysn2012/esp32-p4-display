@@ -31,11 +31,15 @@
 #                   ★ buf_before 必须一直是 0（= 上一声还没被 DMA 取走的字节数）
 #          [I][diag]: PA 扫描 1/4 -> LOW = 关闭 …… 4 轮后打 "PA 锁定 HIGH 常开"
 #          另有 I2C scan 出 0x11 + 0x69、"Max Coord: 480 800"、TOUCH 日志滚动
-#          ★ R6 新增判据（每 25s 一轮，约 6s，期间测试音暂停）：
+#          ★ R6/R7 判据（每 25s 一轮，约 6s，期间测试音暂停）：
 #            [I][m3]: MIC 探针② 采集 3 秒 —— 对着板上麦克风出声 / 拍手   ← 这 3 秒请出声或拍手
 #            [I][m3]: MIC 回读：块数=N min=.. max=.. 跨度=..
+#            R7 起探针会先补写 ADC 差分输入+I2S 格式+增益（回读 0x09/0x0A/0x0B/0x0C/0x16）
 #            跨度 >500 ⇒ codec/时钟/电平全活，故障在模拟输出段（量测表 ①②）
-#            有块但全 0 ⇒ codec 没在转换（量测表 ③④ + LRCK 直流分量）
+#            有块但全 0 ⇒ ADC 差分+格式+增益补齐后仍 0 ⇒ codec 没在转换（铁证）
+#                        ⇒ 量测表 ③④ + LRCK 直流分量（判 1.8V/3.3V IO 域）
+#          ★ R7 新增试听旋律：每 10s 一段"哆-来-哆"三音上行（2667/2000/4000Hz），
+#            与常驻 2kHz 测试音音高不同 —— 只要喇叭通路有任何一点声音，都能听出来。
 # ============================================================
 # ★★★ 2026-10-02 R4 —— 根因找到（读原理图第 6 页 "Audio codec" 得出，不是猜测）：
 #   PAM8302A 的 +IN 与 −IN **都被驱动**，是「差分输入」：
@@ -100,6 +104,22 @@
 #        **配置层没有缺项**（详见下方 R6 块）。⇒ 本轮不改任何音频参数，只加一个
 #        「麦克笔回读探针」：用 codec 自己的 ADC 反证时钟/电平/codec 是否活着，
 #        一次烧录把断点定位到「codec 之前」还是「codec 之后（模拟输出段）」。
+#     R7  ★★★ R6 实烧：探针第 2/3 轮块数≈187 但 min=max=0（且房间一直有视频声），
+#        表面判定"codec 没在转换"。但本轮把原理图第 6 页麦克风区域做了**像素级矢量网表
+#        重建**（线段连通分量分析），查清了此前从没查过的**麦克风输入网络**：
+#            LIN1 ──C77 1µF── U13(麦1) pin4「OUT」      LIN2 ──C81 1µF── U14(麦2) pin4「OUT」
+#            RIN1 ──C78 1µF── U13 pin3「GND」(直通AGND)  RIN2 ──C87 1µF── U14 pin3「GND」(直通AGND)
+#        即每颗麦是「信号进 LINx、GND 基准进 RINx」的伪差分接法。而组件 setup()：
+#          · 从不写输入选择 0x0A/0x0B（复位缺省 ADCL=LIN1 / ADCR=RIN1）
+#          · 把 ADC 串口格式 0x0C 写成 0x0D = **left-justified**，与 I2S RX 时序不匹配
+#          · 麦克风预放增益 0x09 = 0x00（0dB）
+#        ⇒ R7 探针录音前补写：0x0A=0xF0(LINSEL/RINSEL=差分) + 0x0B=0x00(DS=0 ⇒ LIN1−RIN1)
+#          + 0x0C=0x0C(ADCFORMAT=I2S、16bit) + 0x09=0x88(±24dB) + 0x16=0x00(关噪声门)，
+#          并回读这 5 条。若这样仍全 0，"codec 没在转换"才算铁证（转硬件：量测表 + LRCK 直流）。
+#        顺带：MCLK 软件链路最后疑点已闭合（i2s_audio_speaker_standard.cpp:480
+#          gpio_cfg = parent_->get_pin_config() 含 .mclk=GPIO30；:434 mclk_multiple 进 clk_cfg）。
+#        另：加 melody 三音旋律（2667/2000/4000Hz 各 300ms，每 10s 一段）供试听 ——
+#          频率全部 ≥2kHz（避开 C69 高通），与常驻测试音音高不同，出声即可分辨。
 # ============================================================
 # ★★★ 2026-10-02 R5 —— "channel: left 没救回来"之后的复盘（全部基于日志与原理图，不猜）
 # ------------------------------------------------------------
@@ -185,9 +205,9 @@ substitutions:
   # ★★ 测试编号（唯一权威来源）：CI 会 grep 这一行，写进产物名和固件文件名。
   #   格式必须严格是  test_round: "Rx"  —— 双引号不能省，
   #   否则 CI 取不到值，产物会被标成 R0-NOTAG（一眼就能看出"这份没编号"）。
-  test_round: "R6"
+  test_round: "R7"
   # 这一轮改了什么 —— 开机日志第二行会原样打出来，不用翻文件就知道烧的是哪一轮。
-  test_round_desc: "显示已验收通过；音频加麦克笔回读探针，软件定位断点在 codec 之前还是之后"
+  test_round_desc: "原理图查清麦接线(LIN=信号/RIN=GND基准)；探针补写ADC差分输入+I2S格式+24dB增益后重判；加旋律试听"
 
 esphome:
   name: ${name}
@@ -397,6 +417,11 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  # R7 旋律播放标志（melody 置位期间压住常驻测试音，免得两股声音在环缓里互相插队）
+  - id: melody_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 # ------------------------------------------------------------
 # M3 音频（官方 es8388 组件 + i2s_audio speaker）
@@ -463,6 +488,8 @@ microphone:
     sample_rate: 16000
     bits_per_sample: 16bit
     channel: stereo              # ★ I2S 麦克风不支持 mono（上游 schema 明确禁止）
+                                 # ★ R7：stereo 正好左右 slot 都收 —— 探针统计交织的 L+R 全部样本，
+                                 #   配合差分输入（LIN1−RIN1）后两个 slot 都有信号，不漏任何一种可能
     # M3 只验证组件初始化；真正消费 mic 数据是 M4 语音助手的事
 
 # ------------------------------------------------------------
@@ -483,7 +510,8 @@ script:
       - lambda: |-
           // ★ R6：麦克风探针占用 I2S 总线期间直接跳过 —— 否则这里见 state≠RUNNING 会调
           //   start() 把 speaker 又拉起来，重新抢走总线锁，探针就采不到数据了。
-          if (id(mic_probe_active))
+          // ★ R7：旋律播放期间也让路（旋律用同一个 speaker，混写会互相截断）。
+          if (id(mic_probe_active) || id(melody_active))
             return;
           // R5：2kHz 方波。16kHz 采样 ⇒ 16000/(2000*2) = 每半周期 4 个采样。
           const int sr = 16000;
@@ -563,7 +591,24 @@ script:
           id(mic_mn) = 32767;
           id(mic_mx) = -32768;
           id(mic_n) = 0;
-          id(es8388_codec).write_byte(0x16, 0x00);   // ADCCONTROL14：关 noise gate
+          // ★★★ R7：补写 ADC 侧四个从未被正确配置的寄存器（原理图网表 + datasheet 实证）：
+          //   板上麦是伪差分接法（信号→LINx、GND 基准→RINx），而组件 setup()：
+          //   从不写 0x0A/0x0B（输入选择）、把 0x0C 写成 left-justified(0x0D)、增益 0x09=0dB。
+          id(es8388_codec).write_byte(0x09, 0x88);   // ADCCONTROL1：MicAmpL/R 都 +24dB（原 0dB）
+          id(es8388_codec).write_byte(0x0A, 0xF0);   // ADCCONTROL2：LINSEL=RINSEL=11 → L-R 差分
+          id(es8388_codec).write_byte(0x0B, 0x00);   // ADCCONTROL3：DS=0 ⇒ LIN1−RIN1（麦1）；清掉 0x02
+          id(es8388_codec).write_byte(0x0C, 0x0C);   // ADCCONTROL4：ADCFORMAT=I2S(组件写的 0x0D 是
+                                                     //   left-justified，与 I2S RX 时序不匹配) + 16bit
+          id(es8388_codec).write_byte(0x16, 0x00);   // ADCCONTROL14：关 noise gate（同 R6）
+          // 回读这 5 条，确认真落进芯片
+          const uint8_t chk[] = {0x09, 0x0A, 0x0B, 0x0C, 0x16};
+          for (uint8_t r : chk) {
+            uint8_t v = 0;
+            if (id(es8388_codec).read_byte(r, &v))
+              ESP_LOGI("m3", "ADC 补写回读 0x%02X = 0x%02X", r, v);
+            else
+              ESP_LOGW("m3", "ADC 补写回读 0x%02X FAIL", r);
+          }
           id(mic_in).start();                         // 非阻塞，驱动在主循环里真正起来
           ESP_LOGI("m3", "MIC 探针② 采集 3 秒 —— 对着板上麦克风出声 / 拍手");
       - delay: 3s
@@ -584,6 +629,89 @@ script:
           id(spk_out).start();
           id(mic_probe_active) = false;
           ESP_LOGI("m3", "MIC 探针③ speaker 已恢复，测试音继续");
+
+  # ------------------------------------------------------------
+  # R7 试听旋律：三音上行 2667 → 2000 → 4000 Hz，各 300ms，每 10s 一段。
+  #   · 频率全部 ≥2kHz —— 避开喇叭回路 C69 10µF 的高通（8Ω ≈ 2.0kHz）
+  #   · 与常驻 2kHz 测试音音高不同，出声即能分辨；melody_active 压住 test_tone 防混写
+  #   · 写法与 test_tone 完全同款（play 指针版 + 补齐循环，非阻塞铁律）
+  #   （★ 与 test_tone/mic_probe 同属一个 script: 列表，不新开键）
+  - id: melody
+    mode: single
+    then:
+      - lambda: |-
+          if (id(mic_probe_active))
+            return;                      // 探针采音期间不来凑热闹
+          id(melody_active) = true;
+      - delay: 100ms
+      - lambda: |-
+          { // 音1：2667Hz（half=16000/5334=3）
+            const int sr = 16000, half = 3, nsamp = sr * 3 / 10, ramp = sr / 100;
+            std::vector<uint8_t> pcm; pcm.reserve(nsamp * 2);
+            for (int i = 0; i < nsamp; i++) {
+              float env = 1.0f;
+              if (i < ramp) env = (float) i / ramp;
+              else if (i > nsamp - ramp) env = (float) (nsamp - i) / ramp;
+              int16_t v = ((i / half) & 1) ? (int16_t) (28000.0f * env) : (int16_t) (-28000.0f * env);
+              pcm.push_back((uint8_t) (v & 0xFF));
+              pcm.push_back((uint8_t) ((v >> 8) & 0xFF));
+            }
+            if (!id(spk_out).is_running()) id(spk_out).start();
+            size_t sent = 0; int guard = 0;
+            while (sent < pcm.size() && guard++ < 10) {
+              size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(2));
+              if (n == 0) break;
+              sent += n;
+            }
+            ESP_LOGI("m3", "MELODY 音1 2667Hz %u/%u bytes", (unsigned) sent, (unsigned) pcm.size());
+          }
+      - delay: 450ms
+      - lambda: |-
+          { // 音2：2000Hz（half=4）
+            const int sr = 16000, half = 4, nsamp = sr * 3 / 10, ramp = sr / 100;
+            std::vector<uint8_t> pcm; pcm.reserve(nsamp * 2);
+            for (int i = 0; i < nsamp; i++) {
+              float env = 1.0f;
+              if (i < ramp) env = (float) i / ramp;
+              else if (i > nsamp - ramp) env = (float) (nsamp - i) / ramp;
+              int16_t v = ((i / half) & 1) ? (int16_t) (28000.0f * env) : (int16_t) (-28000.0f * env);
+              pcm.push_back((uint8_t) (v & 0xFF));
+              pcm.push_back((uint8_t) ((v >> 8) & 0xFF));
+            }
+            if (!id(spk_out).is_running()) id(spk_out).start();
+            size_t sent = 0; int guard = 0;
+            while (sent < pcm.size() && guard++ < 10) {
+              size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(2));
+              if (n == 0) break;
+              sent += n;
+            }
+            ESP_LOGI("m3", "MELODY 音2 2000Hz %u/%u bytes", (unsigned) sent, (unsigned) pcm.size());
+          }
+      - delay: 450ms
+      - lambda: |-
+          { // 音3：4000Hz（half=2）
+            const int sr = 16000, half = 2, nsamp = sr * 3 / 10, ramp = sr / 100;
+            std::vector<uint8_t> pcm; pcm.reserve(nsamp * 2);
+            for (int i = 0; i < nsamp; i++) {
+              float env = 1.0f;
+              if (i < ramp) env = (float) i / ramp;
+              else if (i > nsamp - ramp) env = (float) (nsamp - i) / ramp;
+              int16_t v = ((i / half) & 1) ? (int16_t) (28000.0f * env) : (int16_t) (-28000.0f * env);
+              pcm.push_back((uint8_t) (v & 0xFF));
+              pcm.push_back((uint8_t) ((v >> 8) & 0xFF));
+            }
+            if (!id(spk_out).is_running()) id(spk_out).start();
+            size_t sent = 0; int guard = 0;
+            while (sent < pcm.size() && guard++ < 10) {
+              size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(2));
+              if (n == 0) break;
+              sent += n;
+            }
+            ESP_LOGI("m3", "MELODY 音3 4000Hz %u/%u bytes", (unsigned) sent, (unsigned) pcm.size());
+          }
+      - delay: 450ms
+      - lambda: |-
+          id(melody_active) = false;
 
 # ------------------------------------------------------------
 # R5 自动播测试音 + PA 极性扫描
@@ -616,6 +744,10 @@ interval:
   - interval: 25s
     then:
       - script.execute: mic_probe
+  # ★ R7：每 10s 一段三音旋律试听（约 1.5s；探针运行期间自动让路）
+  - interval: 10s
+    then:
+      - script.execute: melody
 
 display:
   - platform: mipi_dsi
