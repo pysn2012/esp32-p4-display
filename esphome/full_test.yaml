@@ -26,6 +26,17 @@
 #          [I][m3]: BEEP 12800/12800 bytes running=1      ← 每次触摸
 #          另有 I2C scan 出 0x11+0x28+0x55+0x69、"Max Coord: 480 800"、TOUCH 日志滚动
 # ============================================================
+# ★★★ 2026-10-02 R4 —— 根因找到（读原理图第 6 页 "Audio codec" 得出，不是猜测）：
+#   PAM8302A 的 +IN 与 −IN **都被驱动**，是「差分输入」：
+#       LOUT1(pin12) ──C70 1µF── R56 10K ──► +IN(pin3)
+#       ROUT1(pin11) ──C71 1µF── R57 10K ──► −IN(pin4)
+#   它放大的是 (LOUT1 − ROUT1)。而 R3 用的 `channel: mono` 会让 I2S 的
+#   slot_mask = BOTH ⇒ 同一个单声道采样同时送进左右两个 slot ⇒ LOUT1 与 ROUT1
+#   波形完全一致 ⇒ 差值为 0 ⇒ 功放输入恒为 0 ⇒ 一点声音都没有。
+#   改 `channel: left` ⇒ slot_mask = LEFT ⇒ 数据只进左 slot、右 slot 为 0
+#   ⇒ LOUT1 出信号、ROUT1 只维持直流偏置 ⇒ 差分输入终于拿得到信号 ⇒ 出声。
+#   ★ slot_mode 仍是 MONO（stream info 是编译期默认 1ch），PCM 格式与环缓都不变。
+# ============================================================
 # ★★ 2026-10-01 第三轮（第二轮修完仍无声）—— 已把所有软件可控变量逐条核对/试掉：
 #   ① ES8388 配置已与三份 known-good 初始化序列逐寄存器对齐：
 #      ESPHome es8388.cpp + ESP-ADF es8388.c + M5Stack ES8388 模块示例。
@@ -64,16 +75,18 @@
 #     R1  首版合体：M1 显示 + M2 触摸 + M3 音频（裸接 ES8388 + i2s_audio speaker）
 #     R2  修三个缺陷：ES8388 线输出从未使能 / speaker 超时自杀+主循环自锁 / 立体声 vs 单声道
 #     R3  仍无声 → 逐位核对寄存器无误后：PA 极性扫描 + 14 条寄存器回读 + 滴声加大
-#     R4  ← 下一轮改这里，同时往上面的台账补一行
+#     R4  ★根因找到：功放是差分输入(+IN←LOUT1 / −IN←ROUT1)，而 channel: mono 把同一个
+#        采样同时送进左右两个 slot ⇒ (L−R)=0 ⇒ 完全无声。改 channel: left，只喂左声道。
+#     R5  ← 下一轮改这里，同时往上面的台账补一行
 # ============================================================
 substitutions:
   name: p4-full-test
   # ★★ 测试编号（唯一权威来源）：CI 会 grep 这一行，写进产物名和固件文件名。
   #   格式必须严格是  test_round: "Rx"  —— 双引号不能省，
   #   否则 CI 取不到值，产物会被标成 R0-NOTAG（一眼就能看出"这份没编号"）。
-  test_round: "R3"
+  test_round: "R4"
   # 这一轮改了什么 —— 开机日志第二行会原样打出来，不用翻文件就知道烧的是哪一轮。
-  test_round_desc: "PA 极性扫描 + 14 寄存器回读 + 滴声 400ms/0.80"
+  test_round_desc: "修根因：channel mono 改 left（差分工放只认单声道左路）"
 
 esphome:
   name: ${name}
@@ -258,12 +271,26 @@ speaker:
     i2s_dout_pin: GPIO26
     sample_rate: 16000
     bits_per_sample: 16bit
-    # ★ channel 写 mono —— 与 speaker 内部实际生效的格式对齐。
-    #   speaker.h 的 audio_stream_info_ 缺省是 AudioStreamInfo(16bit, 1ch, 16kHz)，
-    #   而唯一能改写它的 set_audio_stream_info() 只有 media_player 会调 ⇒ 写 stereo 无效：
-    #   start_i2s_driver() 里 `channels==1 → slot_mode = I2S_SLOT_MODE_MONO` 会覆盖掉配置。
-    #   证据：上一轮日志 "Created ring buffer with size 16000" = 500ms×16kHz×2B×1ch。
-    channel: mono
+    # ★★★ 2026-10-02 R4：channel 必须写 left —— 这是 R3 仍无声的根因。
+    #   原理图实核（第 6 页 Audio codec）：
+    #     ES8388 LOUT1(pin12) ──C70 1µF── R56 10K ──► U11 PAM8302A +IN(pin3)
+    #     ES8388 ROUT1(pin11) ──C71 1µF── R57 10K ──► U11 PAM8302A −IN(pin4)
+    #   两个输入都被驱动 ⇒ 功放放大的是 (LOUT1 − ROUT1)，是「差分输入」。
+    #   而 slot_mask 决定单声道数据往哪几个 slot 送：
+    #     channel: mono → slot_mask = I2S_STD_SLOT_BOTH ⇒ 同一个采样同时进左右两路
+    #                     ⇒ LOUT1 与 ROUT1 波形完全相同 ⇒ (L−R)=0 ⇒ 功放输入恒 0 ⇒ 无声
+    #     channel: left → slot_mask = I2S_STD_SLOT_LEFT ⇒ 只进左 slot、右 slot 为 0
+    #                     ⇒ LOUT1 出信号、ROUT1 只维持直流偏置 ⇒ 差分输入拿到信号 ⇒ 出声
+    #   源码实核：
+    #     components/i2s_audio/__init__.py:189-196
+    #       channel 非 stereo ⇒ slot_mode = MONO；slot_mask 仅 left/right 时不是 BOTH
+    #     components/i2s_audio/speaker/i2s_audio_speaker_standard.cpp:437-478
+    #       channels==1 只强制 slot_mode = MONO，**slot_mask 原样保留**，最后 slot_cfg.slot_mask = slot_mask
+    #   ★ slot_mode 依旧是 MONO：speaker.h 的 audio_stream_info_ 是编译期默认 (16bit,1ch,16kHz)，
+    #     唯一能改写它的 set_audio_stream_info() 只有 media_player 会调。
+    #     所以 PCM 仍然是「单声道 16bit」不变，环缓仍是 16000B，别的都不用动。
+    #     （证据：日志 "Created ring buffer with size 16000" = 500ms×16kHz×2B×1ch）
+    channel: left
     # ★★ 关键修复：缺省 500ms 会在空闲 500ms 后把 speaker 任务杀掉并销毁 I2S 通道，
     #   于是每轮第一下 play() 返回 0 字节（而且 play() 内的 200ms vTaskDelay 会卡住主循环，
     #   状态机又跑在主循环里 ⇒ 越等越起不来）。never ⇒ 不调 set_timeout()，timeout_ 为空
