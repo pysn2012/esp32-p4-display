@@ -31,6 +31,11 @@
 #                   ★ buf_before 必须一直是 0（= 上一声还没被 DMA 取走的字节数）
 #          [I][diag]: PA 扫描 1/4 -> LOW = 关闭 …… 4 轮后打 "PA 锁定 HIGH 常开"
 #          另有 I2C scan 出 0x11 + 0x69、"Max Coord: 480 800"、TOUCH 日志滚动
+#          ★ R6 新增判据（每 25s 一轮，约 6s，期间测试音暂停）：
+#            [I][m3]: MIC 探针② 采集 3 秒 —— 对着板上麦克风出声 / 拍手   ← 这 3 秒请出声或拍手
+#            [I][m3]: MIC 回读：块数=N min=.. max=.. 跨度=..
+#            跨度 >500 ⇒ codec/时钟/电平全活，故障在模拟输出段（量测表 ①②）
+#            有块但全 0 ⇒ codec 没在转换（量测表 ③④ + LRCK 直流分量）
 # ============================================================
 # ★★★ 2026-10-02 R4 —— 根因找到（读原理图第 6 页 "Audio codec" 得出，不是猜测）：
 #   PAM8302A 的 +IN 与 −IN **都被驱动**，是「差分输入」：
@@ -89,7 +94,12 @@
 #          修掉"只有最顶上那条 10px 整体偏左 1px"；并新增斑马块/竖线验收图案。
 #        （★ R5 从未编译过 ⇒ 编号沿用 R5、不升 R6，避免台账里出现一个从没存在过的轮次；
 #           本行即 R5 的最终内容。）
-#     R6  ← 下一轮改这里，同时往上面的台账补一行
+#     R6  ★ 音频诊断轮（显示那半已由用户验收通过：斑马块 A/B 一致、黄线笔直 ⇒ 1px 收口）。
+#        官方文档 https://esphome.io/components/audio_dac/es8388/ 逐条对完 + 本地 M5 Tab5
+#        （同为 ESP32-P4 + ES8388、同 26/27/28/29/30 引脚的能出声工程）逐项对比 ⇒
+#        **配置层没有缺项**（详见下方 R6 块）。⇒ 本轮不改任何音频参数，只加一个
+#        「麦克笔回读探针」：用 codec 自己的 ADC 反证时钟/电平/codec 是否活着，
+#        一次烧录把断点定位到「codec 之前」还是「codec 之后（模拟输出段）」。
 # ============================================================
 # ★★★ 2026-10-02 R5 —— "channel: left 没救回来"之后的复盘（全部基于日志与原理图，不猜）
 # ------------------------------------------------------------
@@ -139,14 +149,45 @@
 #     · 若这两种极性下**都听不到**，软件侧真的没有可查项了，请按"推送到GitHub清单.md"
 #       R5 节的量测表在板上量三个点（codec 输出 / 功放输出 / 喇叭），能一步锁定断点。
 # ============================================================
+# ★★★ 2026-10-02 R6 —— 官方文档 + Tab5 参考逐项对比后的结论，以及本轮为什么这么改
+# ------------------------------------------------------------
+# ① 官方 es8388 文档（audio_dac/es8388）能配的只有 3 样：address（缺省 0x10，我们 0x11 ✔）、
+#    i2c_id ✔、以及两个 select 实体（dac_output：LINE1/LINE2/BOTH；adc_input_mic）。
+#    select 的 dac_output 本质就是 set_dac_output()（es8388.cpp:191-229 实核：写
+#    0x2E~0x31 音量 + 0x04 DACPOWER），我们 on_boot 里已经调了 DAC_OUTPUT_BOTH，
+#    是 LINE1 的超集 ⇒ **官方能做的我们都做了，且比缺省做得更全**。
+# ② 本地 M5 Tab5 工程（ESP32-P4 + ES8388 + 同一组 26/27/28/29/30 引脚，能出声）对比：
+#      Tab5:  i2s lrclk=GPIO29 bclk=GPIO27 mclk=GPIO30 / dout=26 / din=28   ← 与本板一致
+#            es8388 不写 address（那块板 CE 接法对应 0x10）/ speaker 用 channel: mono + 48kHz
+#      本板:  原理图第 6 页权威网络表 GPIO29=I2S_SCLK(BCLK)、GPIO27=I2S_LRCLK ⇒ 我们的
+#            bclk=29 / lrclk=27 才是对的（两块板在这两点上恰好互换，别照抄 Tab5）
+#    ⇒ 与已知能出声的 P4+ES8388 参考相比，我们**只差两处，且都有依据**：
+#        · sample_rate 16000 vs 48000：codec 侧 0x18=0x02(256 倍比、single speed) 对
+#          8k~48k 都成立，16k 的 MCLK=4.096MHz 也是标准值 ⇒ 不构成无声理由（不改，少动变量）。
+#        · channel left vs mono：本板功放是差分输入（LOUT1−ROUT1），Tab5 是单端；
+#          mono 会把同一采样喂进两个 slot ⇒ 差分输入恒 0 ⇒ **在咱这板上 mono 必哑**。
+#          ESP-IDF 官方 TX 表已证明 mono+LEFT ⇒ 右 slot 输出 0（不是复制）⇒ left 是对的。
+# ③ 顺带从源码实核掉一个嫌疑：microphone 与 speaker 共用一条 i2s_audio 总线**不是**问题 ——
+#    麦克风的 RX 通道只在 start_driver_() 里创建（i2s_audio_microphone.cpp:98 try_lock），
+#    没人消费麦克风它全程不动，不会改时钟/引脚。
+# ④ ⇒ 软件侧彻底对齐已知良好参考之后仍然无声，断点只剩两种可能，本轮用软件一次分清：
+#      A. codec 没在转换（I2S 时钟/电平进不去 codec）—— 但 ADC 与 DAC 共用同一套时钟，
+#         所以 **让 codec 自己的 ADC 采一段声音**就能反证；
+#      B. codec 活着，故障在 LOUT1/ROUT1 → PAM8302 → 喇叭 的模拟输出段。
+#    → 新增 mic_probe 脚本（见 script 段）：停 speaker → 采 3 秒声 → 打印 min/max/块数。
+#      · 块数>0 且跨度 >500  ⇒ A 排除，故障在模拟输出段 ⇒ 按量测表量 ①②（喇叭/功放SD）
+#      · 块数>0 但全 0       ⇒ codec 没在转换 ⇒ 按量测表量 ③④ 与 LRCK 直流（判电平域）
+#      · 块数=0              ⇒ 麦克风驱动没起来（看 ERROR 日志）
+#    （这就是"不用万用表也能把断点定位到半条链路"的办法；量测表见 推送到GitHub清单.md）
+# ============================================================
 substitutions:
   name: p4-full-test
   # ★★ 测试编号（唯一权威来源）：CI 会 grep 这一行，写进产物名和固件文件名。
   #   格式必须严格是  test_round: "Rx"  —— 双引号不能省，
   #   否则 CI 取不到值，产物会被标成 R0-NOTAG（一眼就能看出"这份没编号"）。
-  test_round: "R5"
+  test_round: "R6"
   # 这一轮改了什么 —— 开机日志第二行会原样打出来，不用翻文件就知道烧的是哪一轮。
-  test_round_desc: "显示改整帧取模 修顶部10px偏1px + 斑马/竖线验收图；音频 2kHz 方波自动播 + 回读 18 条"
+  test_round_desc: "显示已验收通过；音频加麦克笔回读探针，软件定位断点在 codec 之前还是之后"
 
 esphome:
   name: ${name}
@@ -226,6 +267,29 @@ esphome:
               else
                 ESP_LOGW("m3", "ES8388 reg 0x%02X READ FAIL", r);
             }
+
+            // ★★★ R6 麦克笔回读探针（软件定位断点，不用万用表）：
+            //   ES8388 的 ADC 与 DAC 共用同一套 MCLK/BCLK/LRCK。若 ADC 能采到真实声音，
+            //   就证明「P4→codec 的时钟 + 电平 + codec 本体」全部活着，
+            //   故障只剩 LOUT1/ROUT1 → PAM8302 → 喇叭 这段模拟通路；若采回全 0，
+            //   问题在时钟/电平/codec，模拟输出段就不用查了。
+            //   回调里只做 min/max 统计（跑在主循环，必须便宜）；开关与打日志交给 mic_probe。
+            //   签名实核：microphone.h:23 template<typename F> void add_data_callback(F &&)。
+            id(mic_in).add_data_callback([](const std::vector<uint8_t> &data) {
+              if (!id(mic_probe_active))
+                return;
+              const int16_t *p = reinterpret_cast<const int16_t *>(data.data());
+              const size_t n = data.size() / sizeof(int16_t);
+              for (size_t i = 0; i < n; i++) {
+                const int16_t v = p[i];
+                if (v < id(mic_mn))
+                  id(mic_mn) = v;
+                if (v > id(mic_mx))
+                  id(mic_mx) = v;
+              }
+              id(mic_n) += 1;
+            });
+            ESP_LOGI("m3", "MIC 回读探针已注册");
   # ★ 注意：set_audio_stream_info 只在 media_player 里被调用，普通 i2s_audio speaker 的
   #   stream info 用的是 speaker.h 里的编译期默认值 (16bit / 1ch / 16kHz) ——
   #   所以本文件所有 PCM 必须是「单声道 16bit 16kHz」，见下面 play_beep。
@@ -316,6 +380,23 @@ globals:
     type: int
     restore_value: no
     initial_value: '-1'
+  # R6 麦克风探针统计（on_boot 注册的回调写、mic_probe 读）
+  - id: mic_mn
+    type: int
+    restore_value: no
+    initial_value: '32767'
+  - id: mic_mx
+    type: int
+    restore_value: no
+    initial_value: '-32768'
+  - id: mic_n
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: mic_probe_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
 
 # ------------------------------------------------------------
 # M3 音频（官方 es8388 组件 + i2s_audio speaker）
@@ -400,6 +481,10 @@ script:
   - id: test_tone
     then:
       - lambda: |-
+          // ★ R6：麦克风探针占用 I2S 总线期间直接跳过 —— 否则这里见 state≠RUNNING 会调
+          //   start() 把 speaker 又拉起来，重新抢走总线锁，探针就采不到数据了。
+          if (id(mic_probe_active))
+            return;
           // R5：2kHz 方波。16kHz 采样 ⇒ 16000/(2000*2) = 每半周期 4 个采样。
           const int sr = 16000;
           const int nsamp = sr * 4 / 10;        // 400ms = 6400 采样
@@ -456,6 +541,51 @@ script:
                      (int) id(spk_out).is_running(), (int) buf_before);
 
 # ------------------------------------------------------------
+# R6 麦克笔回读探针 —— 不用万用表，把断点定位到「codec 之前」还是「codec 之后」
+# 原理：ES8388 的 ADC 与 DAC 共用同一套 MCLK/BCLK/LRCK（0x2B=0x80 显式共用 LRCK）。
+#   · ADC 采到真实声音 ⇒ 时钟/电平/codec 全活 ⇒ 故障在 LOUT1/ROUT1 → PAM8302 → 喇叭
+#   · ADC 采回来全 0   ⇒ codec 没在转换 ⇒ 查时钟/电平（量测表 ③④ 与 LRCK 直流分量）
+# 为什么先停 speaker：speaker 配了 timeout: never，RUNNING 期间一直持有父总线锁，
+#   unlock 只出现在停止/出错路径（i2s_audio_speaker.cpp:273/282/305/327）；
+#   麦克风的 start_driver_() 要 try_lock（i2s_audio_microphone.cpp:98）⇒ 不停就永远拿不到。
+# 顺带关掉 ADC 的 noise gate：组件 setup() 把 0x16(ADCCONTROL14) 写成 0xC3
+#   （NGTH=-40.5dB + NGG=静音 ADC）⇒ 安静环境下 ADC 会被强制输出 0，探针会误判成"没在转换"。
+# 判读见脚本末尾三条 ESP_LOGE。（★ 与 test_tone 同属一个 script: 列表，不新开键）
+  - id: mic_probe
+    mode: single
+    then:
+      - lambda: |-
+          id(mic_probe_active) = true;
+          ESP_LOGI("m3", "MIC 探针① 停 speaker、释放 I2S 总线锁（约 6 秒后恢复）");
+          id(spk_out).stop();
+      - delay: 2s
+      - lambda: |-
+          id(mic_mn) = 32767;
+          id(mic_mx) = -32768;
+          id(mic_n) = 0;
+          id(es8388_codec).write_byte(0x16, 0x00);   // ADCCONTROL14：关 noise gate
+          id(mic_in).start();                         // 非阻塞，驱动在主循环里真正起来
+          ESP_LOGI("m3", "MIC 探针② 采集 3 秒 —— 对着板上麦克风出声 / 拍手");
+      - delay: 3s
+      - lambda: |-
+          id(mic_in).stop();
+          const bool got = id(mic_n) > 0;
+          const int span = id(mic_mx) - id(mic_mn);
+          ESP_LOGI("m3", "MIC 回读：块数=%d min=%d max=%d 跨度=%d",
+                   id(mic_n), id(mic_mn), id(mic_mx), span);
+          if (!got)
+            ESP_LOGE("m3", "★ 判定：一个数据块都没收到 ⇒ 麦克风驱动没起来（往上翻 ERROR）");
+          else if (span > 500)
+            ESP_LOGE("m3", "★ 判定：ADC 采到真实声音 ⇒ 时钟/电平/codec 全部正常 ⇒ 故障在 LOUT1/ROUT1→功放→喇叭（模拟输出段），量测表量 ①②");
+          else
+            ESP_LOGE("m3", "★ 判定：有数据块但全是 0 ⇒ codec 没在转换（时钟/电平），量测表量 ③④ 与 LRCK 直流分量");
+      - delay: 500ms
+      - lambda: |-
+          id(spk_out).start();
+          id(mic_probe_active) = false;
+          ESP_LOGI("m3", "MIC 探针③ speaker 已恢复，测试音继续");
+
+# ------------------------------------------------------------
 # R5 自动播测试音 + PA 极性扫描
 # ★ 为什么改成自动播：不用再摸屏幕（触摸只留坐标日志），随时可以拿表量、拿耳朵听。
 # ★ PA 扫描：每 5s 翻一次、共 4 次，之后锁死 HIGH 常开 ——
@@ -481,6 +611,11 @@ interval:
             id(pa_enable).turn_on();
             ESP_LOGI("diag", "PA 锁定 HIGH 常开，后面不再动");
           }
+  # ★ R6：每 25s 做一次麦克笔回读探针（约 6s，期间测试音暂停）。
+  #   探针会先把 PA 扫描那 25s 避开：开机 25s 时 PA 已锁 HIGH，互不干扰。
+  - interval: 25s
+    then:
+      - script.execute: mic_probe
 
 display:
   - platform: mipi_dsi
