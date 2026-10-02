@@ -298,30 +298,42 @@ void MipiDsi::draw_pixel_at(int x, int y, Color color) {
   }
   if (!this->check_buffer_())
     return;
-  // ★★★ 2026-10-01 面板列相位软件对齐（X_SHIFT）
-  //   【现象】整幅画面沿**逻辑 y 方向**（= 本函数 rotation 270 分支之后的 x，
-  //     即帧缓冲的行内像素方向）整体平移约 10px，并且是**回绕**的：
-  //     屏幕最上沿那 10px 露出的是画面最底部的内容（40px 角块下沿 = 1/4 块）。
-  //   【为什么轴向就是 x】270° ⇒ swap 之后 x = 逻辑 ly、y = 799 − 逻辑 lx，
-  //     最后 pos = y * width_ + x ⇒ 行内索引 x 就是用户视角的"竖直方向"。
-  //     触摸侧独立佐证：用户"竖直"= 触摸芯片 x（480 轴）。两路一致。
+  // ★★★ 2026-10-02 R5 面板相位补偿 —— 关键修正：必须按「整帧线性」取模，不能按「行内」取模
+  //   【现象（用户实烧两轮，逐轮确认）】
+  //     a) 只有 X_SHIFT 之前：整幅画面沿用户视角的**竖直**方向偏 10px，且**回绕** ——
+  //        屏幕最上沿那 10px 露出的其实是画面**最底部**的内容（蓝/白角块下沿 = 1/4 块）。
+  //     b) 用「行内取模」补偿 10px 之后：正片全对齐了，**只剩最顶上那 10px 条带整体偏左 1px**。
+  //   【唯一自洽的模型（由 a、b 两条反推）】
+  //     面板读这一帧时，**起点比我们早 10 个像素，而且是整帧线性的**（不是"每行各偏 10"）。
+  //     即：面板位置 p（p = 行 r × width_ + 列 c）显示的是缓冲区**线性下标 (p − 10)**。
+  //     · 对 c ≥ 10 的绝大多数像素：等价于"行内右移 10" ⇒ 行内取模补偿 10 刚好抵消 ✔
+  //     · 对**每行最前面 10 列**（c ≤ 9）：p − 10 会跨到**上一行的最后 10 列**，
+  //       而行内取模只搬了列、没搬行 ⇒ 这 10 列拿到的内容差**整整一行**。
+  //       ★ 用户视角：这 10 列正是"最顶上那条 10px"，差一行 = **水平方向差 1px**
+  //         ⇒ 完全对得上"只有补正到顶部的那 10 偏左了"。
+  //     · 反过来也解释 (a)：当时没补偿，(r, c≤9) 拿到的是上一行末 10 列的原始内容，
+  //       而那 10 列写的正是画面**最底部** 10 行的内容 ⇒ "底部卷到顶部" ✔
+  //   【正确做法】把补偿作用在**整帧线性下标**上 —— 搬列的同时把"跨行"也搬对：
+  //       pos = (y × width_ + x − 10) mod (width_ × height_)
+  //     这样每行最前 10 列会从上一行的末 10 列取到**正确**内容，1px 台阶消失。
+  //   【修完怎么判】屏幕最上面那条 10px 条带的内容必须与它下面**完全对齐**。
+  //     最直观的验法见同目录 full_test.yaml：display lambda 里画了"顶部 + 中部"两把刻度尺，
+  //     两把尺子的竖边应严丝合缝；差 1px 都会露出台阶。
   //   【为什么只能软件修】实测 hsync_back_porch 40→30 重烧，画面**完全不动**；
-  //     已确认 porch 确实进了 esp_lcd_dpi_panel_config_t.video_timing（见本文件 84 行），
-  //     且整帧走的是 write_to_display_ 的对齐整幅快路径（x_offset==0 && x_pad==0），
-  //     排除了"非对齐矩形拷贝"这一类原因。⇒ 这是面板侧的固定列相位。
-  //   【原理】面板把我们的第 c 列显示到它的第 (c + X_SHIFT) mod width_ 列，
-  //     故把像素写到 x' = (x − X_SHIFT) mod width_，面板再右移 X_SHIFT 即还原（含回绕）。
+  //     porch 确实进了 esp_lcd_dpi_panel_config_t.video_timing（见本文件 84 行），
+  //     且整帧走 write_to_display_ 的对齐整幅快路径（x_offset==0 && x_pad==0）。
+  //   【调法】X_SHIFT = 0 关闭；与实测不符时改符号（−10 → +10，即把下面那个减法换成加法）。
+  //     若哪天要退回旧的"行内取模"，把那两行换成：
+  //       x = (x - X_SHIFT + width_) % width_;   pos = y * width_ + x;
   //   【覆盖面】display.cpp 的 filled_rectangle / horizontal_line / line / circle /
   //     filled_circle / rectangle 都最终经 draw_pixel_at ⇒ 只改这一处即全局生效。
   //     两个已核例外（本补偿**不**覆盖）：
-  //       ① MipiDsi::fill() 被本文件重写为直接 std::fill_n —— 整屏同色，
-  //          平移不影响观感；clear() 与"占满整屏的 filled_rectangle"走它。
-  //       ② draw_pixels_at()（贴图/位图路径）绕过 draw_pixel_at ⇒ M4 显示图片时
-  //          要另行补偿，或改为逐像素绘制。
-  //   【调法】X_SHIFT = 0 关闭补偿；方向反了（偏得更多）改成 -10；按实测残差微调。
+  //       ① MipiDsi::fill() 被本文件重写为直接 std::fill_n —— 整屏同色，平移不影响观感。
+  //       ② draw_pixels_at()（贴图/位图路径）绕过 draw_pixel_at ⇒ M4 显示图片时要另行补偿。
   static constexpr int X_SHIFT = 10;
-  x = (x - X_SHIFT + static_cast<int>(this->width_)) % static_cast<int>(this->width_);
-  size_t pos = (y * this->width_) + x;
+  const size_t frame_px = static_cast<size_t>(this->width_) * static_cast<size_t>(this->height_);
+  size_t pos = (static_cast<size_t>(y) * static_cast<size_t>(this->width_)) + static_cast<size_t>(x);
+  pos = (pos + frame_px - static_cast<size_t>(X_SHIFT)) % frame_px;
   switch (this->color_depth_) {
     case display::COLOR_BITNESS_565: {
       auto *ptr_16 = reinterpret_cast<uint16_t *>(this->buffer_);

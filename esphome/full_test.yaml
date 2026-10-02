@@ -16,15 +16,21 @@
 #          触摸  TP_INT=GPIO20  TP_RST=GPIO13
 #          音频  I2S: MCLK=30 BCLK=29 LRCK=27 DOUT(播)=26 DIN(录)=28
 #                功放使能 PA_EN=GPIO31（PAM8302，厂商配置为高有效常开）
-# 通过   : ① 屏幕出现四角色块+十字 ② 黄点跟手 ③ 每次触摸有"滴"声
+# 通过   : ① 屏幕出现四角色块+十字 ② 黄点跟手 ③ 开机后**能持续听到 2kHz 断续测试音**
+#          ★ R5 新增显示判据（看，不用量）：
+#            · 顶部那块"黑/白 2px 竖条纹"（ly 0~39）必须与中部那块（ly 200~239）**长得一模一样**；
+#              若顶部那 10px 黑白整体对调 ⇒ 还有 1px 台阶（补偿没修好）。
+#            · 两根黄色 1px 竖线（lx=420/424，ly 0~180）必须**笔直**，不能在顶部露出折角。
 # 排查   : 日志按顺序确认 ——
-#          [I][m3]: ES8388 DAC output BOTH enable = OK   ← 线输出使能成功
-#          [I][m3]: ES8388 reg 0x04 = 0x3C / 0x17 = 0x18 / 0x19 = 0x20 / 0x27 = 0x90 /
-#                   0x2A = 0x90 / 0x2B = 0x80 / 0x2E~0x31 = 0x1E   ← 寄存器回读（第三轮新增）
+#          [I][app:...]  Project p4.full_test version R5    ← 确认烧的确实是 R5
+#          [I][m3]: ES8388 DAC output BOTH enable = OK      ← 线输出使能成功
+#          [I][m3]: ES8388 reg 0x04 = 0x3C / 0x17 = 0x18 / 0x18 = 0x02 / 0x19 = 0x20 /
+#                   0x1A = 0x1B = 0x00 / 0x2E~0x31 = 0x1E    ← 18 条回读（R5 补齐）
 #          [I][m3]: speaker start requested
-#          [I][diag]: PA=HIGH 或 PA=LOW  ← 本次触摸用的功放极性（第三轮新增）
-#          [I][m3]: BEEP 12800/12800 bytes running=1      ← 每次触摸
-#          另有 I2C scan 出 0x11+0x28+0x55+0x69、"Max Coord: 480 800"、TOUCH 日志滚动
+#          [I][m3]: TONE #1 12800/12800 bytes running=1 buf_before=0   ← 每 4 声一行
+#                   ★ buf_before 必须一直是 0（= 上一声还没被 DMA 取走的字节数）
+#          [I][diag]: PA 扫描 1/4 -> LOW = 关闭 …… 4 轮后打 "PA 锁定 HIGH 常开"
+#          另有 I2C scan 出 0x11 + 0x69、"Max Coord: 480 800"、TOUCH 日志滚动
 # ============================================================
 # ★★★ 2026-10-02 R4 —— 根因找到（读原理图第 6 页 "Audio codec" 得出，不是猜测）：
 #   PAM8302A 的 +IN 与 −IN **都被驱动**，是「差分输入」：
@@ -67,26 +73,80 @@
 # ============================================================
 # ★★ 测试编号台账（规则：每改一次本文件，就把 test_round 加 1）
 #   编号会同时出现在三个地方，互相印证 —— 以后再也不会"不清楚测没测过"：
-#     ① 开机日志：`===== BOOT CONFIG = M1+M2+M3 full_test  [R3] =====`
-#        紧接着 app 组件还会打一行 `Project p4.full_test version R3`
-#     ② CI 产物名：  esphome-full_test-R3-<短sha>
-#     ③ 固件文件名： firmware-R3.factory.bin   ← 烧的就是它
+#     ① 开机日志：`===== BOOT CONFIG = M1+M2+M3 full_test  [R5] =====`
+#        紧接着 app 组件还会打一行 `Project p4.full_test version R5`
+#     ② CI 产物名：  esphome-full_test-R5-<短sha>
+#     ③ 固件文件名： firmware-R5.factory.bin   ← 烧的就是它
 #   历轮：
 #     R1  首版合体：M1 显示 + M2 触摸 + M3 音频（裸接 ES8388 + i2s_audio speaker）
 #     R2  修三个缺陷：ES8388 线输出从未使能 / speaker 超时自杀+主循环自锁 / 立体声 vs 单声道
 #     R3  仍无声 → 逐位核对寄存器无误后：PA 极性扫描 + 14 条寄存器回读 + 滴声加大
 #     R4  ★根因找到：功放是差分输入(+IN←LOUT1 / −IN←ROUT1)，而 channel: mono 把同一个
 #        采样同时送进左右两个 slot ⇒ (L−R)=0 ⇒ 完全无声。改 channel: left，只喂左声道。
-#     R5  ← 下一轮改这里，同时往上面的台账补一行
+#     R5  仍无声 ⇒ 把 R4 那份日志本身当证据重新读了一遍（结论见下方 R5 块）：
+#        软件侧已无可疑项，问题在 codec 之后的模拟通路；测试音改 2kHz 方波 + 自动重复播。
+#        ★ 显示同轮修正：X_SHIFT 补偿从「行内取模」改成「**整帧线性取模**」——
+#          修掉"只有最顶上那条 10px 整体偏左 1px"；并新增斑马块/竖线验收图案。
+#        （★ R5 从未编译过 ⇒ 编号沿用 R5、不升 R6，避免台账里出现一个从没存在过的轮次；
+#           本行即 R5 的最终内容。）
+#     R6  ← 下一轮改这里，同时往上面的台账补一行
+# ============================================================
+# ★★★ 2026-10-02 R5 —— "channel: left 没救回来"之后的复盘（全部基于日志与原理图，不猜）
+# ------------------------------------------------------------
+# ① R4 日志反过来证明了**数字侧已经全通**，而且是硬的证据，不是"看起来正常"：
+#     · 18 条寄存器回读全部等于目标值（R4 只回读 14 条，本轮补齐到 18 条）。
+#       回读发生在 on_boot priority:-100，即所有组件 setup() 之后，是**最终状态**：
+#       speaker 的 set_volume()/set_mute_off() 发生在它自己的 setup()（i2s_audio_speaker.cpp:39
+#       `this->set_volume(this->volume_)`）⇒ 早于我们的回读 ⇒ 0x04=0x3C / 0x19=0x20 就是最终值。
+#     · 27 次连续 `BEEP 12800/12800 bytes` ⇒ **环形缓冲确实在被 DMA 抽干**。
+#       反证：环缓只有 16000 字节，若 TX 通道没使能、数据不被消费，第 2 次 play 就不可能
+#       还写进去 12800 字节（play 走 write_without_replacement，满了就少写）。
+#       ⇒ TX 通道已 enable ⇒ BCLK/LRCK 在跑；MCLK 与它们同一套时钟树、且
+#         i2s_audio/__init__.py:299 明确 `set_mclk_pin(GPIO30)` ⇒ MCLK 也在跑。
+#     · I2S 配置与 codec 完全对得上：I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG + data 16bit
+#       (slot_bit_width=AUTO ⇒ 16bit slot) + mclk_multiple 默认 256 ⇒ MCLK=4.096MHz，
+#       正对 0x17=0x18(16bit I2S) 与 0x18=0x02(256 倍比)。
+# ② 供电 / 走线 / 喇叭也用原理图核完了，全部没问题（原先的候选全部排除）：
+#     · Codec_3V3 不是被门控的：就是 ESP_3V3 经 FM2 120Ω@100MHz 磁珠 + C53/C55 10µF，
+#       没有任何使能管 ⇒ codec 模拟电源常在有。
+#     · 功放 U11 VDD = ESP_3V3（带 C72 10µF + C73 100nF）⇒ 功放有电。
+#     · SD(pin1) 由 GPIO31 驱动，另挂 R48 10K；PAM8302 的 SD 高电平 = 使能。
+#     · 板载喇叭 U12 是实际存在的（原理图画的是喇叭符号 + 安装孔），且真的接在功放上：
+#         U11 VO+ ── C69 10µF ── 喇叭 ── U11 VO-
+# ③ ★★ 本轮唯一新发现（会影响"怎么测"）：C69 串在喇叭回路里 ⇒ 高通
+#     f_c = 1/(2π·R·C)：8Ω ⇒ ≈2.0kHz，4Ω ⇒ ≈4.0kHz。
+#     也就是说 **原来的 1kHz 测试音本来就被削 7~12dB，而 ≤500Hz 几乎过不去**。
+#     ⇒ 本轮测试音改成 **2kHz 方波**（能量最大），把"被高通吃掉"这个干扰项去掉。
+# ④ 顺带排除：`microphone:` 组件不会被"意外启动"污染 I2S。
+#     i2s_audio_microphone.cpp:34 的 setup() 只创建一个信号量，**不**建 RX 通道、不 lock 父总线；
+#     真正建通道/使能是在 start_driver_()（:98 try_lock + :191 i2s_channel_enable），
+#     只有有人消费麦克风时才会走。本配置没人消费它 ⇒ 它全程不动，不会改 MCLK/时钟。
+# ------------------------------------------------------------
+# ★ R5 做了什么 / 怎么判：
+#     · 音频从"触摸→滴一声(1kHz/400ms)"改成 **每 800ms 自动播 400ms 的 2kHz 方波**：
+#       不用再摸屏幕，随时可以拿万用表量；并顺带打了 `buf_before=` ，
+#       它应当是 0（上一声已被抽干）。若长期为 1 ⇒ TX 根本没在消费数据（那就是另一个问题）。
+#     · PA_EN 每 5s 翻一次、共 4 次，然后锁死 HIGH 常开：
+#       测试音若跟着"有→无→有"地切 ⇒ 功放+喇叭+codec 整条通路都是通的。
+#     · 触摸只留坐标日志（不再参与音频），少一个变量。
+#     · ★ 显示（本轮的另外一半）：components/mipi_dsi/mipi_dsi.cpp 的相位补偿从
+#       「行内取模」`x=(x−10+width_)%width_` 改成「**整帧线性取模**」`pos=(y*w+x−10)%(w*h)`。
+#       为什么非改不可：行内取模只搬列、没搬行 ⇒ "每行最前 10 列"会跨行取到**上一行末尾**的内容，
+#       而那 10 列在 rotation 270 下正是屏幕最顶上那条 10px ⇒ 现象 = "只有顶部 10px 整体偏左 1px"
+#       （两轮实烧逐轮确认）。整帧取模把"跨行"也一起搬对，台阶消失。
+#       ⇒ display lambda 里同步加了验收图案：顶部/中部各一块 2px 斑马块（错 1px 就黑白对调）
+#         + 两根跨边界黄竖线（错 1px 就出折角）。
+#     · 若这两种极性下**都听不到**，软件侧真的没有可查项了，请按"推送到GitHub清单.md"
+#       R5 节的量测表在板上量三个点（codec 输出 / 功放输出 / 喇叭），能一步锁定断点。
 # ============================================================
 substitutions:
   name: p4-full-test
   # ★★ 测试编号（唯一权威来源）：CI 会 grep 这一行，写进产物名和固件文件名。
   #   格式必须严格是  test_round: "Rx"  —— 双引号不能省，
   #   否则 CI 取不到值，产物会被标成 R0-NOTAG（一眼就能看出"这份没编号"）。
-  test_round: "R4"
+  test_round: "R5"
   # 这一轮改了什么 —— 开机日志第二行会原样打出来，不用翻文件就知道烧的是哪一轮。
-  test_round_desc: "修根因：channel mono 改 left（差分工放只认单声道左路）"
+  test_round_desc: "显示改整帧取模 修顶部10px偏1px + 斑马/竖线验收图；音频 2kHz 方波自动播 + 回读 18 条"
 
 esphome:
   name: ${name}
@@ -148,7 +208,16 @@ esphome:
             //     0x2A = 0x90  同上，右声道
             //     0x2B = 0x80  slrck：ADC/DAC 共用 LRCK
             //     0x2E~0x31 = 0x1E  LOUT1/ROUT1/LOUT2/ROUT2 输出音量（0x00 = 最小，别留 0）
-            const uint8_t chk[] = {0x00, 0x02, 0x04, 0x17, 0x18, 0x19, 0x26, 0x27, 0x2A, 0x2B, 0x2E, 0x2F, 0x30, 0x31};
+            //   ★ R5 补齐的 4 条（原先没回读，属于盲区）：
+            //     0x01 = 0x50  ChipControl2（setup() 写死 0x50，与 ESP-ADF 同值）
+            //     0x08 = 0x00  MASTERMODE：0x00 = codec 作 I2S 从机（主机是 P4）
+            //     0x1A = 0x00 / 0x1B = 0x00  DAC 数字音量：0x00 = 0dB（最大值，不是静音）
+            //        ★ 这两个是 set_volume() 写的，而 speaker 在它自己的 setup() 里
+            //          就会调一次 set_volume(1.0) ⇒ 0x1A/0x1B 必为 0x00。
+            //          若读出来不是 0x00，说明音量被压下去了（例如 0xC0 = -96dB ⇒ 哑）。
+            const uint8_t chk[] = {0x00, 0x01, 0x02, 0x04, 0x08, 0x17, 0x18,
+                                   0x19, 0x1A, 0x1B, 0x26, 0x27, 0x2A, 0x2B,
+                                   0x2E, 0x2F, 0x30, 0x31};
             for (uint8_t r : chk) {
               uint8_t v = 0;
               bool ok = id(es8388_codec).read_byte(r, &v);
@@ -220,16 +289,17 @@ output:
     frequency: 1000Hz
 
 switch:
-  # 功放使能（PAM8302）。★ 2026-10-01 第三轮起：本开关不再固定常开，
-  #   而是由 on_touch 里的极性扫描每次触摸翻转一次（HIGH ↔ LOW），
-  #   用来在一次烧录内同时试出两种极性。日志里紧跟 TOUCH 的那行 PA=HIGH/LOW 就是本次极性。
-  #   restore_mode 仍留 ALWAYS_ON：它只决定开机初始电平（HIGH），随后由扫描接管。
-  # ★ 若两种极性都无声 ⇒ PA 不是原因，按下面顺序继续查硬件：
-  #   1) 板上有没有耳机座？耳机座的机械开关会切断功放输出（最容易被忽略的一条）
-  #   2) 喇叭是否真的接在 JST/端子上，量一下喇叭两端电阻（应为 4~8Ω，开路=没接）
-  #   3) 量 ES8388 的 LOUT1/ROUT1 静态直流：应约 VDD/2（≈1.65V）。
-  #      为 0V 或悬浮 ⇒ codec 模拟输出没起来；有 1.65V ⇒ codec 已输出，问题在功放/喇叭侧
-  #   4) 量 PAM8302 的 VDD 与 SD 脚电平
+  # 功放使能（PAM8302 的 SD 脚）。PAM8302 的 SD 是**高电平使能**。
+  # ★ R5 起：本开关由上面 interval(5s) 自动扫 4 次（HIGH↔LOW）后锁死常开，
+  #   restore_mode: ALWAYS_ON 只决定开机初始电平（HIGH）。
+  # ★ 原理图实核（第 6 页）：SD ← GPIO31(PA_EN)，另挂 R48 10K；功放 VDD = ESP_3V3。
+  #   ⇒ 若测试音跟着扫描"有→无→有"地切，功放+喇叭+codec 通路即全部正常。
+  # ★ 若两种极性都听不到 ⇒ 软件侧已无可查项，按下面三点在板上量（详见 推送到GitHub清单.md R5 节）：
+  #   1) 喇叭两端交流电压（最容易探的点，喇叭焊盘大）：放音时应 >0.2V AC；0 ⇒ 功放没在推
+  #   2) U11 的 VO+/VO-(pin5/8) 对 GND 直流：应约 1.6V 且两脚接近（无信号时的中点）⇒ 功放有电且已使能
+  #   3) U10 的 LOUT1(pin12) 或 C70 靠 codec 那侧焊盘对 AGND 直流：应约 1.6V（偏置）
+  #      · 直流 0V/悬浮 ⇒ codec 模拟输出级没起来（供电/使能问题）
+  #      · 直流 ≈1.6V 但放音时交流 ≈0 ⇒ **codec 没在做转换**（时钟/数据没到，查 MCLK=GPIO30）
   - platform: gpio
     pin: GPIO31
     id: pa_enable
@@ -314,19 +384,27 @@ microphone:
     channel: stereo              # ★ I2S 麦克风不支持 mono（上游 schema 明确禁止）
     # M3 只验证组件初始化；真正消费 mic 数据是 M4 语音助手的事
 
-# "滴"声发生器：1kHz 正弦、**400ms**、16kHz、**单声道** 16bit PCM，带 20ms 淡入淡出防爆音。
+# ------------------------------------------------------------
+# R5 测试音发生器：**2kHz 方波**、400ms、16kHz、**单声道** 16bit PCM，带 10ms 淡入淡出防爆音。
+# ★★ 为什么是 2kHz（而不是原来的 1kHz）：
+#   原理图实核 —— 板载喇叭 U12 与功放之间**串了一颗 C69 10µF**：
+#       U11 VO+ ──C69 10µF── 喇叭 ── U11 VO-
+#   它和喇叭阻抗构成高通 f_c = 1/(2π·R·C)：8Ω ⇒ ≈2.0kHz、4Ω ⇒ ≈4.0kHz。
+#   ⇒ **1kHz 的测试音本来就会被削 7~12dB，≤500Hz 基本过不去**。测试音必须 ≥2kHz，
+#     才能把"是不是被这颗电容吃掉了"这个干扰项彻底排除（方波能量最大，最不容易漏听）。
 # ★★ 必须是单声道：speaker 内部的 stream info 是编译期默认的 1 声道（详见 speaker 段注释），
 #    喂立体声会让它按 2 字节一帧去解析 4 字节的立体声数据 ⇒ 音调/时长全错。
-# ★ 2026-10-01 第三轮：幅度 0.45→0.80、时长 300ms→400ms。排查阶段要"只要有一点点声音就能听见"，
-#   不要因为音量太小而误判成完全无声。400ms 单声道 = 12800 字节 < 环缓 16000 字节，仍一次装得下。
+# ★ 400ms 单声道 = 12800 字节 < 环缓 16000 字节，仍一次装得下（600ms 就超了，别加长）。
 # ★ 注意：**不能**写 id(spk_out).play(pcm)（vector 版）—— 见下方 lambda 内的名字隐藏说明。
 script:
-  - id: play_beep
+  - id: test_tone
     then:
       - lambda: |-
+          // R5：2kHz 方波。16kHz 采样 ⇒ 16000/(2000*2) = 每半周期 4 个采样。
           const int sr = 16000;
           const int nsamp = sr * 4 / 10;        // 400ms = 6400 采样
-          const int ramp = sr / 50;             // 20ms 包络
+          const int ramp = sr / 100;            // 10ms 包络（防爆音）
+          const int half = sr / 4000;           // 2kHz 半周期采样数 = 4
           std::vector<uint8_t> pcm;
           pcm.reserve(nsamp * 2);               // 单声道 16bit ⇒ 2 字节/采样 = 12800 字节
           for (int i = 0; i < nsamp; i++) {
@@ -335,8 +413,8 @@ script:
               env = (float) i / ramp;
             else if (i > nsamp - ramp)
               env = (float) (nsamp - i) / ramp;
-            float s = sinf(2.0f * 3.14159265f * 1000.0f * i / sr) * 0.80f * env;
-            int16_t v = (int16_t) (s * 32767);
+            // 满幅方波 ±30000（≈ -0.8dBFS）：排查阶段宁大勿小
+            int16_t v = ((i / half) & 1) ? (int16_t) (30000.0f * env) : (int16_t) (-30000.0f * env);
             pcm.push_back((uint8_t) (v & 0xFF));         // 小端：低字节
             pcm.push_back((uint8_t) ((v >> 8) & 0xFF));  // 小端：高字节
           }
@@ -356,6 +434,10 @@ script:
           //   timeout: never 已保证 speaker 常驻 RUNNING，正常情况下一次就写完 12800 字节。
           // ★ 内部行为（i2s_audio_speaker.cpp 实核）：走
           //   write_without_replacement(..., write_partial=true) ⇒ 允许部分写入 ⇒ 需要补齐循环。
+          // ★ R5：先看一眼"上一声有没有被抽干"，再写新的一声。
+          //   buf_before 正常应当一直是 0（上一声 400ms 的数据早就被 DMA 取走了）。
+          //   若它长期为 1 ⇒ 环形缓冲根本没人消费 ⇒ TX 通道没在跑（那才是真正的数字侧故障）。
+          bool buf_before = id(spk_out).has_buffered_data();
           if (!id(spk_out).is_running())
             id(spk_out).start();          // 只置 COMMAND_START 事件位，非阻塞
           size_t sent = 0;
@@ -363,11 +445,42 @@ script:
           while (sent < pcm.size() && guard++ < 8) {
             size_t n = id(spk_out).play(pcm.data() + sent, pcm.size() - sent, pdMS_TO_TICKS(2));
             if (n == 0)
-              break;   // 环形缓冲暂时塞不进 → 放弃本次（下一下触摸会补上）
+              break;   // 环形缓冲暂时塞不进 → 放弃本次（下一轮 800ms 后会补上）
             sent += n;
           }
-          ESP_LOGI("m3", "BEEP %u/%u bytes running=%d", (unsigned) sent,
-                   (unsigned) pcm.size(), (int) id(spk_out).is_running());
+          static uint32_t tone_n = 0;
+          tone_n++;
+          if ((tone_n % 4) == 1)   // 每 4 声打一行，不刷屏
+            ESP_LOGI("m3", "TONE #%u %u/%u bytes running=%d buf_before=%d",
+                     (unsigned) tone_n, (unsigned) sent, (unsigned) pcm.size(),
+                     (int) id(spk_out).is_running(), (int) buf_before);
+
+# ------------------------------------------------------------
+# R5 自动播测试音 + PA 极性扫描
+# ★ 为什么改成自动播：不用再摸屏幕（触摸只留坐标日志），随时可以拿表量、拿耳朵听。
+# ★ PA 扫描：每 5s 翻一次、共 4 次，之后锁死 HIGH 常开 ——
+#   测试音若跟着"有 → 无 → 有"地切，就说明功放 + 喇叭 + codec 整条通路都是通的。
+# ------------------------------------------------------------
+interval:
+  - interval: 800ms
+    then:
+      - script.execute: test_tone
+  - interval: 5s
+    then:
+      - lambda: |-
+          static uint8_t n = 0;
+          n++;
+          if (n <= 4) {
+            bool on = ((n % 2) == 0);     // 开机是 ALWAYS_ON ⇒ 先让它 5s 后变 LOW，做第一次对比
+            if (on)
+              id(pa_enable).turn_on();
+            else
+              id(pa_enable).turn_off();
+            ESP_LOGI("diag", "PA 扫描 %u/4 -> %s", (unsigned) n, on ? "HIGH = 使能" : "LOW = 关闭");
+          } else if (n == 5) {
+            id(pa_enable).turn_on();
+            ESP_LOGI("diag", "PA 锁定 HIGH 常开，后面不再动");
+          }
 
 display:
   - platform: mipi_dsi
@@ -386,9 +499,12 @@ display:
     lane_bit_rate: 500Mbps
     pclk_frequency: 36MHz
     # ★★ 2026-10-01：改 porch 无效（实测无变化），恢复厂商值。
-    #   列方向 ~10px 的刚性平移改由 components/mipi_dsi/mipi_dsi.cpp 的
-    #   X_SHIFT=10 软件对齐处理（例外：fill() / draw_pixels_at() 不覆盖，
-    #   见该文件 draw_pixel_at 内注释）。完整推导见 touch_test.yaml 同一段注释。
+    #   列方向 ~10px 的刚性平移改由 components/mipi_dsi/mipi_dsi.cpp 的 X_SHIFT=10 软件对齐。
+    # ★★★ 2026-10-02 R5 修正：补偿必须按「整帧线性取模」pos=(y*480+x−10)%384000，
+    #   **不能**按「行内取模」。实测：行内取模会让"每行最前 10 列"跨行取到上一行末尾的内容，
+    #   而那 10 列在 rotation 270 下正是屏幕最顶上那条 10px ⇒ 表现为"只有顶部 10px 整体偏左 1px"。
+    #   例外（本补偿不覆盖）：fill()（std::fill_n 整屏同色）与 draw_pixels_at()（贴图，M4 另补）。
+    #   完整推导见 components/mipi_dsi/mipi_dsi.cpp 内 draw_pixel_at 上方注释。
     hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40
@@ -418,6 +534,28 @@ display:
       it.line(cx - 60, cy, cx + 60, cy, Color(70, 70, 70));
       it.line(cx, cy - 60, cx, cy + 60, Color(70, 70, 70));
       it.rectangle(1, 1, w - 2, h - 2, Color(60, 60, 60));
+
+      // ------------------------------------------------
+      // ★★★ R5 显示验收图案：专盯"最顶上那条 10px 有没有水平错 1px"
+      //   背景：这条 10px 就是 X_SHIFT 补偿里"每行最前 10 列跨行取数"的那一段。
+      //   ① 相位检器 —— 2px 竖条纹（黑/白交替）。
+      //      只要水平方向错 1px，黑白相位就**整体对调**。2px 的周期 = 最灵敏的游标尺。
+      //      块 A 的 ly 从 0 开始（必须跨过那条边界 ly=10）；
+      //      块 B 放在屏幕中部（完全在正常区域），作为"正确长相"的参照物。
+      //      判据：块 A 上下一整条必须连续；一旦在 ly=10 附近出现"黑白突然对调"的横向分界
+      //            ⇒ 补偿还没到位，1px 台阶仍在。
+      //   ② 台阶检器 —— 两根 1px 细竖线，从 ly=0 一路拉到 ly=180（跨过边界）。
+      //      直线的边缘连续性人眼极其敏感，任何 1px 水平错位都会在 ly=10 处露出一个折角。
+      //      这两条线同时也是"最直接"的证据：一眼看它直不直。
+      //   ★ 两者都只经 draw_pixel_at ⇒ 会走 X_SHIFT 补偿，正是我们要验的那条路径。
+      //     （fill() 不走补偿，所以清屏不能用来验证。）
+      for (int i = 0; i < 100; i++) {
+        Color sc = (i & 1) ? Color(255, 255, 255) : Color(0, 0, 0);
+        it.filled_rectangle(100 + i * 2, 0, 2, 40, sc);      // 块 A：跨边界 ly=0..39
+        it.filled_rectangle(100 + i * 2, 200, 2, 40, sc);    // 块 B：对照 ly=200..239
+      }
+      it.vertical_line(420, 0, 180, Color(255, 255, 0));
+      it.vertical_line(424, 0, 180, Color(255, 255, 0));
 
       // 触摸落点：黄实心圆 + 白圈
       if (id(last_touch_x) >= 0 && id(last_touch_y) >= 0) {
@@ -463,32 +601,13 @@ touchscreen:
       mirror_x: true
       mirror_y: false
     on_touch:
-      # 触摸 → 更新黄点 + 播"滴"（一次触摸同时验证 M2 和 M3）
+      # ★ R5：触摸只更新黄点 + 记坐标。音频改由上面的 interval 自动循环播，
+      #   PA 极性也改由 interval 自动扫 ⇒ 触摸不再参与音频，变量更少、日志更干净。
       - lambda: |-
           id(last_touch_x) = touch.x;
           id(last_touch_y) = touch.y;
           ESP_LOGI("m2", "TOUCH calc=(%d,%d) raw=(%d,%d)",
                    touch.x, touch.y, touch.x_raw, touch.y_raw);
-      # ★★★ 2026-10-01 第三轮：PA 极性扫描（一次烧录同时试两种极性）
-      #   背景：codec 寄存器已逐位核对（es8388 配置与 ESPHome/ADF/M5Stack 三份
-      #   known-good 初始化序列一致），数字链路也已证通（BEEP 12800/12800 + running=1 +
-      #   全程无 Stopped）。剩下唯一由软件控制、且从未实测过的变量就是 PA_EN(GPIO31) 极性。
-      #   做法：每摸一次翻转一次 PA 电平，下一行紧跟本次电平日志，再播"滴"。
-      #   判读：只听其中一半（HIGH 或 LOW）会响 ⇒ 极性确定；
-      #         两种都无声 ⇒ PA 极性不是原因，问题在 ES8388 之后的模拟通路/接线/喇叭。
-      - lambda: |-
-          static bool pa_high = false;
-          static uint32_t n = 0;
-          n++;
-          pa_high = !pa_high;
-          if (pa_high) {
-            id(pa_enable).turn_on();
-          } else {
-            id(pa_enable).turn_off();
-          }
-          ESP_LOGI("diag", "PA=%s  (#%u)  ---- 若紧接着那声滴能听到，极性就是它",
-                   pa_high ? "HIGH" : "LOW", (unsigned) n);
-      - script.execute: play_beep
     on_release:
       - lambda: |-
           ESP_LOGI("m2", "RELEASE");
