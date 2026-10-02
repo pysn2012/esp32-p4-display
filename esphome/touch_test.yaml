@@ -16,9 +16,18 @@
 # ============================================================
 substitutions:
   name: p4-touch-test
+  # ★★ 测试编号：CI 会 grep 这一行，写进产物名 ＋ 固件文件名；每改本文件 +1。
+  #   格式必须严格是  test_round: "Rx"（双引号不能省，否则 CI 标成 R0-NOTAG）。
+  test_round: "R1"
+  test_round_desc: "M2 触摸定稿（transform + 10px 列相位补偿），已实烧验收"
 
 esphome:
   name: ${name}
+  # ★★ 编号进固件元数据 —— 开机自动打印 `Project p4.touch_test version R1`
+  #   （项目名必须恰好含一个点，见 core/config.py:203）
+  project:
+    name: "p4.touch_test"
+    version: "${test_round}"
   # ★ 开机横幅（2026-09-30 加）：日志第一屏就能确认烧进去的是哪个配置。
   #   教训 —— 曾把 M1 的 screen_test 固件当成 M2 固件烧进去，整个日志里
   #   没有任何 i2c / touchscreen 记录才发觉。有这一行就一眼可辨。
@@ -27,7 +36,7 @@ esphome:
     priority: 600
     then:
       - logger.log:
-          format: "===== BOOT CONFIG = M2 touch_test ====="
+          format: "===== BOOT CONFIG = M2 touch_test  [${test_round}] ====="
           level: INFO
   # ★ 不要在这里放长 delay —— on_boot 的 delay 会阻塞主循环，
   #   而显示刷新（update_interval）是主循环驱动的，结果就是屏幕长时间

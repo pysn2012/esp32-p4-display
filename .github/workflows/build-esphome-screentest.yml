@@ -44,7 +44,45 @@ jobs:
           # 2) 不锁版本时 CI 可能装到旧版 → AttributeError: transform_schema
           pip install esphome==2026.9.0
 
-      # 步骤4：编译固件
+      # ★★ 步骤4（新增）：从配置文件里读出「测试编号」
+      #   编号的唯一权威来源 = YAML 里 substitutions.test_round（如 "R3"）。
+      #   它会被写进 ① 产物名 ② 固件文件名 ③ 本页 Run summary。
+      #   配置文件里没写 test_round 的，会拿到 R0-NOTAG —— 产物名一眼就能看出"这份没编号"。
+      - name: 读取测试编号
+        id: tag
+        run: |
+          CFG="${{ inputs.config }}"
+          NAME="${CFG%.yaml}"
+          # 只认行首的 test_round: "..."，不会误抓 test_round_desc
+          ROUND=$(grep -m1 -oE '^[[:space:]]*test_round:[[:space:]]*"[^"]*"' "esphome/$CFG" \
+                  | sed -E 's/.*"([^"]*)".*/\1/' || true)
+          if [ -z "$ROUND" ]; then ROUND="R0-NOTAG"; fi
+          SHORT=$(git rev-parse --short=7 HEAD)
+          STAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          echo "round=$ROUND" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME"   >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+
+          echo "===== 本次构建：编号 $ROUND / 配置 $CFG / commit $SHORT / $STAMP ====="
+          if [ "$ROUND" = "R0-NOTAG" ]; then
+            echo "::warning::这个配置文件里没有 test_round，产物会标成 R0-NOTAG"
+          fi
+
+          {
+            echo "## 本次构建"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| **测试编号** | \`$ROUND\` |"
+            echo "| 配置 | \`$CFG\` |"
+            echo "| Commit | \`$SHORT\` |"
+            echo "| 编译时刻（UTC） | $STAMP |"
+            echo ""
+            echo "烧录用文件：\`firmware-${ROUND}.factory.bin\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 步骤5：编译固件
       - name: 编译固件
         run: |
           # 进入配置文件目录
@@ -52,7 +90,7 @@ jobs:
           # 编译固件，生成bin文件（文件名来自 workflow_dispatch 的 config 输入）
           esphome compile ${{ inputs.config }}
 
-      # 步骤5：动态查找编译产物
+      # 步骤6：动态查找编译产物
       - name: 动态查找 firmware.bin
         id: find_fw
         run: |
@@ -65,16 +103,30 @@ jobs:
           echo "FACTORY=$FACTORY" >> $GITHUB_OUTPUT
           echo "ELF=$ELF" >> $GITHUB_OUTPUT
 
-      # 步骤6：上传固件
+      # ★★ 步骤7（新增）：把测试编号烙进固件文件名
+      #   原来的名字一律是 firmware.factory.bin，二十个轮次长得一模一样，
+      #   烧完根本分不清手里这份是哪一轮 → 现在统一带编号，例如 firmware-R3.factory.bin。
+      - name: 给固件加上测试编号
+        run: |
+          R="${{ steps.tag.outputs.round }}"
+          OUT="dist"
+          rm -rf "$OUT"; mkdir -p "$OUT"
+
+          cp "${{ steps.find_fw.outputs.FACTORY }}" "$OUT/firmware-$R.factory.bin"
+          cp "${{ steps.find_fw.outputs.OTA }}"     "$OUT/firmware-$R.ota.bin"
+          cp "${{ steps.find_fw.outputs.ELF }}"     "$OUT/firmware-$R.elf"
+          # 顺手把这一轮的配置文件也归档进去，事后可回溯源码
+          cp "esphome/${{ inputs.config }}"         "$OUT/$R-${{ inputs.config }}"
+
+          ls -l "$OUT"
+
+      # 步骤8：上传固件
       - name: 上传固件到 Artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: esphome-${{ inputs.config }}-${{ github.sha }}
-          path: |
-            ${{ steps.find_fw.outputs.OTA }}
-            ${{ steps.find_fw.outputs.FACTORY }}
-            ${{ steps.find_fw.outputs.ELF }}
-            esphome/${{ inputs.config }}
+          # 产物名 = esphome-<配置>-<测试编号>-<短sha>，例如 esphome-full_test-R3-1a2b3c4
+          name: esphome-${{ steps.tag.outputs.name }}-${{ steps.tag.outputs.round }}-${{ steps.tag.outputs.short }}
+          path: dist/*
           # 产物缺失时显式失败，避免静默上传空包
           if-no-files-found: error
           retention-days: 30

@@ -19,16 +19,25 @@
 # ============================================================
 substitutions:
   name: p4-screen-test
+  # ★★ 测试编号：CI 会 grep 这一行，写进产物名 ＋ 固件文件名；每改本文件 +1。
+  #   格式必须严格是  test_round: "Rx"（双引号不能省，否则 CI 标成 R0-NOTAG）。
+  test_round: "R1"
+  test_round_desc: "M1 点屏定稿（rotation 270 + color_order RGB + 列相位 X_SHIFT），已实烧验收"
 
 esphome:
   name: ${name}
+  # ★★ 编号进固件元数据 —— 开机自动打印 `Project p4.screen_test version R1`
+  #   （项目名必须恰好含一个点，见 core/config.py:203）
+  project:
+    name: "p4.screen_test"
+    version: "${test_round}"
   # ★ 开机横幅（2026-09-30 加）：日志第一屏就能确认烧进去的是哪个配置。
   #   注意本文件是 M1 回归基线，正常只用来验证显示；跑触摸请用 touch_test.yaml。
   on_boot:
     priority: 600
     then:
       - logger.log:
-          format: "===== BOOT CONFIG = M1 screen_test (display only, NO touch) ====="
+          format: "===== BOOT CONFIG = M1 screen_test (display only, NO touch)  [${test_round}] ====="
           level: INFO
   # ★ 注意：不要在这里用长 delay 做测试序列 —— on_boot 的 delay 会阻塞
   #   主循环，而显示刷新（update_interval）是主循环驱动的，结果就是

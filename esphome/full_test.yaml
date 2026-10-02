@@ -54,11 +54,36 @@
 #      YAML 的 channel 对 speaker 无效（环缓 16000B = 单声道佐证）⇒ 立体声 PCM 是错的。
 #      → 改喂单声道 PCM，channel 写 mono 与实际一致。
 # ============================================================
+# ★★ 测试编号台账（规则：每改一次本文件，就把 test_round 加 1）
+#   编号会同时出现在三个地方，互相印证 —— 以后再也不会"不清楚测没测过"：
+#     ① 开机日志：`===== BOOT CONFIG = M1+M2+M3 full_test  [R3] =====`
+#        紧接着 app 组件还会打一行 `Project p4.full_test version R3`
+#     ② CI 产物名：  esphome-full_test-R3-<短sha>
+#     ③ 固件文件名： firmware-R3.factory.bin   ← 烧的就是它
+#   历轮：
+#     R1  首版合体：M1 显示 + M2 触摸 + M3 音频（裸接 ES8388 + i2s_audio speaker）
+#     R2  修三个缺陷：ES8388 线输出从未使能 / speaker 超时自杀+主循环自锁 / 立体声 vs 单声道
+#     R3  仍无声 → 逐位核对寄存器无误后：PA 极性扫描 + 14 条寄存器回读 + 滴声加大
+#     R4  ← 下一轮改这里，同时往上面的台账补一行
+# ============================================================
 substitutions:
   name: p4-full-test
+  # ★★ 测试编号（唯一权威来源）：CI 会 grep 这一行，写进产物名和固件文件名。
+  #   格式必须严格是  test_round: "Rx"  —— 双引号不能省，
+  #   否则 CI 取不到值，产物会被标成 R0-NOTAG（一眼就能看出"这份没编号"）。
+  test_round: "R3"
+  # 这一轮改了什么 —— 开机日志第二行会原样打出来，不用翻文件就知道烧的是哪一轮。
+  test_round_desc: "PA 极性扫描 + 14 寄存器回读 + 滴声 400ms/0.80"
 
 esphome:
   name: ${name}
+  # ★★ 测试编号进固件元数据 —— 开机后 app 组件会自动打印：
+  #   [I][app:153]: Project p4.full_test version R3
+  #   （源码实核：core/application.cpp:153 ESP_LOGI(TAG, "Project " ... " version " ...)）
+  #   项目名必须恰好含一个点（core/config.py:203 valid_project_name），故写 p4.full_test。
+  project:
+    name: "p4.full_test"
+    version: "${test_round}"
   # ★ 两个 on_boot：600 打印横幅（越早越好），-100 做音频收尾（必须晚于所有 setup）。
   #   -100 = setup_priority::LATE，保证 ES8388 的 setup() 已经跑完。
   # ★ 不要在这里放长 delay —— on_boot 的 delay 会阻塞主循环，
@@ -68,7 +93,11 @@ esphome:
     - priority: 600
       then:
         - logger.log:
-            format: "===== BOOT CONFIG = M1+M2+M3 full_test ====="
+            format: "===== BOOT CONFIG = M1+M2+M3 full_test  [${test_round}] ====="
+            level: INFO
+        # ★ 第二行：这一轮的编号 + 改动摘要。看日志就能确认烧的是哪一轮。
+        - logger.log:
+            format: "[${test_round}] ${test_round_desc}"
             level: INFO
     - priority: -100
       then:
