@@ -40,6 +40,12 @@
 #                        ⇒ 量测表 ③④ + LRCK 直流分量（判 1.8V/3.3V IO 域）
 #          ★ R7 新增试听旋律：每 10s 一段"哆-来-哆"三音上行（2667/2000/4000Hz），
 #            与常驻 2kHz 测试音音高不同 —— 只要喇叭通路有任何一点声音，都能听出来。
+#          ★ R8 旁路试听（每 30s 一窗，窗内约 8s，日志打 "SIDETONE ON … 请拍手"）：
+#            ES8388 官方模拟旁路：LIN1(麦1信号)/RIN1(麦1基准) → 混音器(+6dB) → LOUT1/ROUT1
+#            → C70/C71 → PAM8302A(差分) → 喇叭。**全程不经过 I2S/ADC/DAC**。
+#            听到拍手回放或啸叫 ⇒ 模拟段+功放+喇叭全活 ⇒ 唯一断点 = I2S 接口（硬件）；
+#            全程死寂 ⇒ codec 模拟段或功放/喇叭段故障（量 C70/C71→PAM→喇叭）。
+#            （R7 的 melody 每 10s 轮已停用，避免干扰旁路听窗。）
 # ============================================================
 # ★★★ 2026-10-02 R4 —— 根因找到（读原理图第 6 页 "Audio codec" 得出，不是猜测）：
 #   PAM8302A 的 +IN 与 −IN **都被驱动**，是「差分输入」：
@@ -120,6 +126,18 @@
 #          gpio_cfg = parent_->get_pin_config() 含 .mclk=GPIO30；:434 mclk_multiple 进 clk_cfg）。
 #        另：加 melody 三音旋律（2667/2000/4000Hz 各 300ms，每 10s 一段）供试听 ——
 #          频率全部 ≥2kHz（避开 C69 高通），与常驻测试音音高不同，出声即可分辨。
+#     R8  ★★★ R7 实烧判读（2026-10-03）+ 模拟旁路测试（详见下方 R8 块）：
+#        R7 回读全对（0x0B 粘死位排除）+ 拍手环境 4 轮探针全 0 + melody 无声
+#        ⇒ ADC+DAC 双死 ⇒ 断点 = I2S 时钟/电平没进 codec。原理图第 2 页 12x 实核：
+#        pin62(VDD_IO_4=GPIO26-31 域) 与 pin59/67(VDD_PSRAM_0/1) 被实心结点竖线短接，
+#        同网挂 ESP_3V3+VDD_PSRAM 两冲突标记；datasheet：VDD_PSRAM=输入 1.65~1.95V，
+#        由片内 VDDO2_PSRAM LDO(pin72,1.9V) 供电（C20+C21 与指南一致）；PSRAM 活着
+#        ⇒ 该网实测 ≈1.9V ⇒ GPIO26-31 摆幅 < ES8388(3.3V, V_IH≈2.3V) 门限 ⇒ 双死。
+#        ★ R8 = ES8388 datasheet rev5.0 §9.1 官方 Bypass 通道：LMIXSEL/LI2LO/RI2RO
+#          把 LIN1/RIN1 **纯模拟**混进输出驱动，"irrespective of whether the DACs are
+#          running or not" —— 完全不经过 I2S/ADC/DAC/时钟。喇叭里听到拍手/啸叫
+#          ⇒ codec 模拟段+功放+喇叭+麦克风全活 ⇒ 断点钉死在 I2S 接口（电平/走线）；
+#          仍无声 ⇒ codec 模拟段或功放/喇叭有问题，转查 C70/C71→PAM→喇叭段。
 # ============================================================
 # ★★★ 2026-10-02 R5 —— "channel: left 没救回来"之后的复盘（全部基于日志与原理图，不猜）
 # ------------------------------------------------------------
@@ -205,9 +223,9 @@ substitutions:
   # ★★ 测试编号（唯一权威来源）：CI 会 grep 这一行，写进产物名和固件文件名。
   #   格式必须严格是  test_round: "Rx"  —— 双引号不能省，
   #   否则 CI 取不到值，产物会被标成 R0-NOTAG（一眼就能看出"这份没编号"）。
-  test_round: "R7"
+  test_round: "R8"
   # 这一轮改了什么 —— 开机日志第二行会原样打出来，不用翻文件就知道烧的是哪一轮。
-  test_round_desc: "原理图查清麦接线(LIN=信号/RIN=GND基准)；探针补写ADC差分输入+I2S格式+24dB增益后重判；加旋律试听"
+  test_round_desc: "ES8388 模拟旁路(sidetone)测试：LIN1/RIN1 经输出混音器直通 LOUT1/ROUT1，不经 I2S/ADC/DAC —— 一次烧录把『codec 模拟段+功放+喇叭』与『I2S 时钟/电平』彻底分开"
 
 esphome:
   name: ${name}
@@ -713,6 +731,50 @@ script:
       - lambda: |-
           id(melody_active) = false;
 
+  # ------------------------------------------------------------
+  # ★★★ R8：ES8388 官方「模拟旁路」测试（datasheet rev5.0 §6.3.16~6.3.20 + §9.1）
+  # 原理：ES8388 的输出混音器可以把**模拟输入**直接混进输出驱动——
+  #       LMIXSEL(0x26 bit5:3)=000 选 LIN1、RMIXSEL(bit2:0)=000 选 RIN1；
+  #       LI2LO(0x27 bit6)=1 把 LIN 混进左混音器、RI2RO(0x2A bit6)=1 把 RIN 混进右混音器；
+  #       混音增益 LI2LOVOL/RI2ROVOL(bit5:3)：000=+6dB。
+  #       datasheet §9.1 原话：mixers/output drivers "can be separately enabled ...
+  #       irrespective of whether the DACs are running or not" —— **不需要任何 I2S 时钟**。
+  # 链路：麦1 LIN1(信号) ─ 混音器(+24dB PGA +6dB) → LOUT1；RIN1(基准) → ROUT1
+  #       → C70/C71 → PAM8302A 差分(L−R) → 喇叭。**完全绕开 I2S/ADC/DAC/时钟。**
+  # 判读：窗内拍手听到回放/啸叫 ⇒ codec 模拟段+功放+喇叭+麦克风全活
+  #       ⇒ 断点唯一化 = I2S 接口（时钟/电平/走线，即电源域假设）；
+  #       死寂 ⇒ codec 模拟段或功放/喇叭故障（转量 C70/C71→PAM→喇叭段）。
+  # 与 mic_probe 无寄存器冲突（探针写 0x09/0x0A/0x0B/0x0C/0x16，本脚本写 0x26/0x27/0x2A，
+  #   0x09/0x16 两边值相同），重叠窗口互不破坏。
+  # ------------------------------------------------------------
+  - id: sidetone
+    mode: single
+    then:
+      - lambda: |-
+          // 确保 PA 使能（R5 后已锁 HIGH，此处幂等兜底）
+          id(pa_enable).turn_on();
+          // 麦前放 +24dB（0x09 = ADCCONTROL1 MicAmpL/R），关噪声门
+          id(es8388_codec).write_byte(0x09, 0x88);
+          id(es8388_codec).write_byte(0x16, 0x00);
+          // LMIXSEL=LIN1(000) / RMIXSEL=RIN1(000)（与复位缺省一致，显式写防意外）
+          id(es8388_codec).write_byte(0x26, 0x00);
+          // 左混音器：LD2LO=1(bit7，保持 DAC 支路) + LI2LO=1(bit6) + 增益+6dB(bit5:3=000)
+          id(es8388_codec).write_byte(0x27, 0xC0);
+          // 右混音器：RD2RO=1 + RI2RO=1 + 增益+6dB
+          id(es8388_codec).write_byte(0x2A, 0xC0);
+          uint8_t v27 = 0, v2a = 0, v26 = 0;
+          id(es8388_codec).read_byte(0x27, &v27);
+          id(es8388_codec).read_byte(0x2A, &v2a);
+          id(es8388_codec).read_byte(0x26, &v26);
+          ESP_LOGI("m3", "SIDETONE ON —— 请拍手/出声！回读 0x26=0x%02X(期0x00) 0x27=0x%02X(期0xC0) 0x2A=0x%02X(期0xC0)",
+                   v26, v27, v2a);
+      - delay: 8s
+      - lambda: |-
+          // 恢复 setup() 的值（LD2LO/RD2RO=1、LI2LO/RI2RO=0、增益位=000）
+          id(es8388_codec).write_byte(0x27, 0x90);
+          id(es8388_codec).write_byte(0x2A, 0x90);
+          ESP_LOGI("m3", "SIDETONE OFF（混音器已恢复 0x90，等下一个 30s 窗口）");
+
 # ------------------------------------------------------------
 # R5 自动播测试音 + PA 极性扫描
 # ★ 为什么改成自动播：不用再摸屏幕（触摸只留坐标日志），随时可以拿表量、拿耳朵听。
@@ -744,10 +806,11 @@ interval:
   - interval: 25s
     then:
       - script.execute: mic_probe
-  # ★ R7：每 10s 一段三音旋律试听（约 1.5s；探针运行期间自动让路）
-  - interval: 10s
+  # ★ R8：每 30s 开一扇 8s 的「旁路听窗」—— 窗内拍手，听喇叭有没有回放/啸叫。
+  #   （R7 的 melody 10s 轮已停用：旋律走 I2S，已被证明无声，只会干扰旁路听窗。）
+  - interval: 30s
     then:
-      - script.execute: melody
+      - script.execute: sidetone
 
 display:
   - platform: mipi_dsi
