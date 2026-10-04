@@ -46,6 +46,17 @@ jobs:
           # 2) 不锁版本时 CI 可能装到旧版 → AttributeError: transform_schema
           pip install esphome==2026.9.0
 
+      # 步骤3.5：动态生成 secrets.yaml（WiFi 凭据来自仓库 Secrets，不进代码库）
+      #   需要在仓库 Settings → Secrets and variables → Actions 里配置两个 Repository secrets：
+      #     WIFI_SSID / WIFI_PASSWORD
+      #   （若未配置则生成空值，编译照常通过，只是 WiFi 连不上）
+      - name: Generate secrets.yaml
+        run: |
+          cat > esphome/secrets.yaml <<EOF
+          wifi_ssid: "${{ secrets.WIFI_SSID }}"
+          wifi_password: "${{ secrets.WIFI_PASSWORD }}"
+          EOF
+
       # ★★ 步骤4（新增）：从配置文件里读出「测试编号」
       #   编号的唯一权威来源 = YAML 里 substitutions.test_round（如 "R3"）。
       #   它会被写进 ① 产物名 ② 固件文件名 ③ 本页 Run summary。
