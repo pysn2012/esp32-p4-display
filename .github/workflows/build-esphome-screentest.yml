@@ -5,7 +5,8 @@ name: build esphome screentest
 on:
   workflow_dispatch:  # 手动触发（推荐）
     # 手动触发时可选择编译哪个阶段的配置：
-    #   full_test.yaml   = M1+M2+M3 全功能验证（当前阶段，默认）
+    #   full_test.yaml   = M1+M2+M3 全功能验证
+    #   ui.yaml          = M4 主界面（LVGL：顶栏/主页时钟/设置页）
     #   touch_test.yaml  = M2 触摸单独验证
     #   screen_test.yaml = M1 点屏（回归基线）
     inputs:
@@ -16,6 +17,7 @@ on:
         type: choice
         options:
           - full_test.yaml
+          - ui.yaml
           - touch_test.yaml
           - screen_test.yaml
 
