@@ -1,30 +1,29 @@
 # ============================================================
-# ESP32-P4 DFR1286 —— 主界面（M4 阶段，单页版）
+# ESP32-P4 DFR1286 —— 主界面（M4 阶段，单页·上下式·绝对定位框架）
 # ============================================================
-# 参考 M5 Tab5 的主页/设置页要素，整合为一页（800×480 横屏）：
-#   顶栏：右上角 = API、WiFi 状态图标（连接后才点亮）+ USB 供电图标（本板无电池）
-#   上部：时间（大）+ 日期 + 星期（横向通栏居中，Tab5 主页式）
-#   下部：显示卡（背光亮度滑块）+ 网络卡（WiFi 名称/IP/信号/API 状态/重启）并排
+# 布局（800×480 横屏，全部绝对定位，所见即所得）：
+#   顶栏 44px：右上角 API / WiFi 图标（连接后才点亮）+ USB 供电图标（无电池）
+#   中部   ：时间（大，屏幕水平居中）+ 日期 + 星期
+#   底部   ：显示卡（亮度滑块）+ 网络卡（目前仅 IP 地址，后续加行）
 #
-# ★ 与 full_test.yaml 的显示架构差异（LVGL 模式硬约束，实核 lvgl/__init__.py 校验器）：
-#   · display 层禁止配 rotation / lambda / auto_clear: true
-#     ⇒ display 原生 480×800，rotation: 270 放在 lvgl: 下，触摸 transform 用原生恒等
-#   · mipi_dsi 组件的 draw_pixels_at 已补 X_SHIFT 逐行补偿（M4R1），
-#     否则 LVGL 界面整体偏 10px 且底部回绕到顶部
+# ★ 框架坐标系（加内容照这个加）：
+#   顶栏 y 0..44；时钟块垂直居中一带 y≈140..270；两卡底边距屏 16px、高 108、行距 36
+#   卡内行 y：标题 6 / 分隔线 40 / 第1行 58 / 第2行 94 / 第3行 130 ...（每行 +36）
+#   左卡 align BOTTOM_LEFT x20；右卡 align BOTTOM_RIGHT x−20；卡宽 372
 #
-# WiFi  ：!secret —— 仓库里放 esphome/secrets.yaml：
-#           wifi_ssid: "你的WiFi"
-#           wifi_password: "你的密码"
-#         C6 协处理器走 ESP-Hosted（SDIO slot 0 = GPIO14~19，EN=GPIO5）。
-#         ★ 若 WiFi 一直连不上：确认 C6 里烧的是 esp-hosted slave 固件。
-# 时间  ：SNTP（时区上海），同步前显示 --:--（时钟字体已含 "-"，不会再出框框）
-# 亮度  ：gamma_correct: 0 ⇒ 滑块 % = PWM 占空比 = 实际亮度（缺省 2.8 时 23% 看着很亮）；
-#         light.on_state 反向同步滑块，开机时序无关，滑块永远与实际一致
-# 编译  ：GitHub Actions（build esphome screentest → 选 ui.yaml）
+# ★ M4R3 教训：嵌套 flex（多层 obj 互相嵌套 + flex_align）在这块屏上没有按预期渲染
+#   （时间挤在左上角 ⇒ 内层布局未生效），框架阶段全部改绝对定位，不再赌 flex 语义。
+#
+# WiFi：!secret + CI 动态生成 secrets.yaml（见 workflow Generate secrets.yaml 步骤）。
+#   当前日志实况：C6 SDIO 初始化失败（sdmmc_card_init failed / ESP-Hosted link not yet up）
+#   ⇒ 十有八九是 C6 里没有 esp-hosted slave 固件 —— UI 框架先行，WiFi 后面单独处理。
+# 时间：SNTP，同步前显示 --:--（时钟字体子集含 "-"，无框框）。
+# 亮度：gamma_correct: 0 ⇒ 滑块 % = PWM 占空比 = 实际亮度；light.on_state 双向同步。
+# 编译：GitHub Actions（build esphome screentest → 选 ui.yaml）
 # ============================================================
 substitutions:
-  test_round: "M4R3"
-  test_round_desc: "单页 UI 改上下式（Tab5 主页式）：时钟通栏在上，显示/网络两卡并排在下；其余同 M4R2"
+  test_round: "M4R4"
+  test_round_desc: "UI 框架改绝对定位（M4R3 嵌套 flex 未生效）；网络卡暂只留 IP；布局坐标系写进头部注释"
 
 esphome:
   name: p4-ui
@@ -71,7 +70,7 @@ esp_ldo:
 # ESP32-C6 WiFi 协处理器（ESP-Hosted，原理图第 7 页）
 #   C6 SDIO 挂在 P4 的 SDMMC slot 0：CLK=GPIO18 CMD=GPIO19 D0~D3=GPIO14~17
 #   C6_EN=GPIO5（R16 10K 上拉）、C6_WAKEUP=GPIO6（本组件未用）
-#   （TF 卡在 slot 1 = GPIO39~45，与本组件无关）
+#   ★ 当前实烧：SDIO card init failed ⇒ 查 C6 是否烧了 esp-hosted slave 固件
 # ------------------------------------------------------------
 esp32_hosted:
   variant: ESP32C6
@@ -89,7 +88,6 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   power_save_mode: none
-  # 桌面 UI 板：离线不重启循环（要恢复缺省行为删掉这两行 0s）
   reboot_timeout: 0s
   ap:
     ssid: "P4-UI-Setup"
@@ -108,15 +106,9 @@ api:
   on_client_connected:
     then:
       - lvgl.widget.show: api_icon
-      - lvgl.label.update:
-          id: api_state
-          text: "已连接"
   on_client_disconnected:
     then:
       - lvgl.widget.hide: api_icon
-      - lvgl.label.update:
-          id: api_state
-          text: "未连接"
 
 ota:
   platform: esphome
@@ -149,7 +141,7 @@ time:
         then:
           - script.execute: ui_update_clock
 
-# WiFi 信息（网络卡展示）
+# WiFi 信息（网络卡展示；后续要加行时再开更多 text_sensor）
 text_sensor:
   - platform: wifi_info
     ip_address:
@@ -160,29 +152,6 @@ text_sensor:
               id: ip_value
               text: !lambda |-
                 return x.empty() ? std::string("--") : x;
-    ssid:
-      id: ssid_ts
-      on_value:
-        then:
-          - lvgl.label.update:
-              id: ssid_value
-              text: !lambda |-
-                return x.empty() ? std::string("--") : x;
-
-sensor:
-  - platform: wifi_signal
-    id: wifi_rssi
-    update_interval: 30s
-    on_value:
-      then:
-        - lvgl.label.update:
-            id: rssi_value
-            text: !lambda |-
-              if (isnan(x))
-                return std::string("-- dBm");
-              char buf[16];
-              snprintf(buf, sizeof(buf), "%.0f dBm", x);
-              return std::string(buf);
 
 button:
   - platform: restart
@@ -198,7 +167,7 @@ globals:
 
 # ------------------------------------------------------------
 # 背光（M1 定论：GPIO11，HIGH 亮）
-# ★ gamma_correct: 0 ⇒ 滑块/状态里的 23% 就是 PWM 23%（缺省 2.8 会把 23% 抬到 ~60% 占空比）
+# ★ gamma_correct: 0 ⇒ 滑块/状态里的百分比就是 PWM 占空比（缺省 2.8 会把 23% 抬到 ~60% 占空比）
 # ------------------------------------------------------------
 output:
   - platform: ledc
@@ -287,11 +256,11 @@ touchscreen:
       mirror_y: false
 
 # ------------------------------------------------------------
-# 字体（M4R2 全面调小）
+# 字体
 #   icon_24        = Material Design Icons（本地 TTF，与 Tab5 同一款）
-#   montserrat_72  = 大时钟（数字+冒号+"-"，占位符 --:-- 不再出框框）
-#   montserrat_24  = 数值（IP/百分比/dBm）
-#   noto_sans_sc_24= 中文标签（按需子集；SSID 可能含任意字符 ⇒ ignore_missing）
+#   montserrat_72  = 大时钟（数字+冒号+"-"，占位符 --:-- 无框框）
+#   montserrat_24  = 数值（IP/百分比）
+#   noto_sans_sc_24= 中文标签（按需子集；缺字不报错）
 # ------------------------------------------------------------
 font:
   - file: "fonts/materialdesignicons-webfont.ttf"
@@ -320,11 +289,11 @@ font:
     id: noto_sans_sc_24
     size: 24
     bpp: 4
-    glyphs: "显示亮度网络名称地址信号强状态已未连接重启设备星期一二三四五六日0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz%:.()-_ "
+    glyphs: "显示亮度网络地址已未连接星期一二三四五六日0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz%:.()-_ "
     ignore_missing_glyphs: true
 
 # ------------------------------------------------------------
-# LVGL 界面（800×480 逻辑横屏，单页）
+# LVGL 界面（800×480 逻辑横屏；全部绝对定位，坐标系见文件头）
 # ------------------------------------------------------------
 lvgl:
   rotation: 270
@@ -332,45 +301,10 @@ lvgl:
   byte_order: little_endian
   buffer_size: 10%
   on_boot:
-    # 与背光实际值对齐（light 恢复完成后运行；此后由 on_state 持续同步）
     - script.execute: ui_sync_brightness
     - lambda: 'id(lvgl_ready) = true;'
-  style_definitions:
-    - id: ui_card
-      bg_color: 0xFFFFFF
-      bg_opa: COVER
-      border_width: 1
-      border_color: 0xE5E5E5
-      border_opa: COVER
-      radius: 12
-      pad_all: 10
-      shadow_width: 0
-    - id: ui_module_title
-      text_font: noto_sans_sc_24
-      text_color: 0x1A4A4A
-      bg_opa: TRANSP
-    - id: ui_divider
-      bg_color: 0xEEEEEE
-      bg_opa: COVER
-      height: 1
-      width: 100%
-    - id: ui_row
-      bg_opa: TRANSP
-      border_opa: TRANSP
-      border_width: 0
-      radius: 0
-      width: 100%
-      height: SIZE_CONTENT
-    - id: ui_label
-      text_font: noto_sans_sc_24
-      text_color: 0x333333
-      bg_opa: TRANSP
-    - id: ui_value
-      text_font: montserrat_24
-      text_color: 0x333333
-      bg_opa: TRANSP
   widgets:
-    # ─────────────── 顶栏（44px，状态图标靠右）───────────────
+    # ─────────────── 顶栏背景条（44px 白底；无布局语义）───────────────
     - obj:
         id: top_bar
         align: TOP_LEFT
@@ -381,276 +315,175 @@ lvgl:
         border_width: 0
         border_opa: TRANSP
         radius: 0
-        pad_left: 16
-        pad_right: 16
-        pad_top: 6
-        pad_bottom: 6
-        layout:
-          type: FLEX
-          flex_flow: ROW
-          flex_align_main: START
-          flex_align_cross: CENTER
-          pad_column: 14
         widgets:
-          - obj:
-              bg_opa: TRANSP
-              border_opa: TRANSP
-              border_width: 0
-              radius: 0
-              flex_grow: 1
-              height: 1
+          # 图标钉在栏内右上角：x 间距 38px
           - label:
               id: api_icon
               hidden: true
+              align: TOP_RIGHT
+              x: -92
+              y: 10
               text_font: icon_24
               text_color: 0x1A4A4A
               text: "\U000F109B"
           - label:
               id: wifi_icon
               hidden: true
+              align: TOP_RIGHT
+              x: -54
+              y: 10
               text_font: icon_24
               text_color: 0x1A4A4A
               text: "\U000F05A9"
           - label:
               id: pwr_icon
+              align: TOP_RIGHT
+              x: -16
+              y: 10
               text_font: icon_24
               text_color: 0x1A4A4A
               text: "\U000F06A5"
-    # ─────────────── 主区（上：时钟通栏；下：两卡并排）───────────────
+    # ─────────────── 中部：时钟 + 日期 + 星期（屏幕居中）───────────────
+    - label:
+        id: time_label
+        align: CENTER
+        y: -60
+        text_font: montserrat_72
+        text_color: 0x1A4A4A
+        text: "--:--"
+    - label:
+        id: date_label
+        align: CENTER
+        y: 14
+        text_font: noto_sans_sc_24
+        text_color: 0x666666
+        text: "----"
+    # ─────────────── 左下：显示卡（372×108）───────────────
+    # 卡内坐标系：标题 y6 / 分隔线 y40 / 第1行 y58 / 第2行 y94 ...
     - obj:
-        id: main_area
-        align: TOP_LEFT
-        y: 44
-        width: 100%
-        height: 436
-        bg_color: 0xF5F5F5
+        id: card_display
+        align: BOTTOM_LEFT
+        x: 20
+        y: -16
+        width: 372
+        height: 108
+        bg_color: 0xFFFFFF
         bg_opa: COVER
-        border_width: 0
-        border_opa: TRANSP
-        radius: 0
-        layout:
-          type: FLEX
-          flex_flow: COLUMN
-          flex_align_main: START
-          flex_align_cross: CENTER
-          pad_row: 12
-        pad_left: 20
-        pad_right: 20
-        pad_top: 12
-        pad_bottom: 12
+        border_width: 1
+        border_color: 0xE5E5E5
+        border_opa: COVER
+        radius: 12
+        shadow_width: 0
         widgets:
-          # ── 上：时间 / 日期 / 星期（通栏居中）──
+          - label:
+              align: TOP_LEFT
+              x: 12
+              y: 6
+              text_font: noto_sans_sc_24
+              text_color: 0x1A4A4A
+              text: "显示"
           - obj:
-              width: 100%
-              height: SIZE_CONTENT
-              bg_opa: TRANSP
-              border_opa: TRANSP
+              align: TOP_LEFT
+              x: 12
+              y: 40
+              width: 348
+              height: 1
+              bg_color: 0xEEEEEE
+              bg_opa: COVER
               border_width: 0
+              border_opa: TRANSP
               radius: 0
-              layout:
-                type: FLEX
-                flex_flow: COLUMN
-                flex_align_main: CENTER
-                flex_align_cross: CENTER
-                pad_row: 10
-              widgets:
-                - label:
-                    id: time_label
-                    text_font: montserrat_72
-                    text_color: 0x1A4A4A
-                    text: "--:--"
-                - label:
-                    id: date_label
-                    text_font: noto_sans_sc_24
-                    text_color: 0x666666
-                    text: "----"
-          # ── 下：显示卡 + 网络卡 并排 ──
+          - label:
+              align: TOP_LEFT
+              x: 12
+              y: 58
+              text_font: noto_sans_sc_24
+              text_color: 0x333333
+              text: "亮度"
+          - slider:
+              id: backlight_slider
+              align: TOP_LEFT
+              x: 96
+              y: 60
+              width: 180
+              height: 22
+              min_value: 5      # 别给 0：全黑容易被当成死机
+              max_value: 100
+              value: 80
+              bg_color: 0xECECEC
+              bg_opa: COVER
+              radius: 11
+              indicator:
+                radius: 11
+                bg_color: 0xFF8C00
+              knob:
+                bg_opa: TRANSP
+              on_release:
+                - light.turn_on:
+                    id: backlight
+                    brightness: !lambda |-
+                      return x / 100.0f;
+          - label:
+              id: brightness_value
+              align: TOP_LEFT
+              x: 288
+              y: 58
+              width: 72
+              text_align: RIGHT
+              text_font: montserrat_24
+              text_color: 0x333333
+              text: "80%"
+    # ─────────────── 右下：网络卡（372×108，暂只留 IP；加行照头部坐标系）───────────────
+    - obj:
+        id: card_network
+        align: BOTTOM_RIGHT
+        x: -20
+        y: -16
+        width: 372
+        height: 108
+        bg_color: 0xFFFFFF
+        bg_opa: COVER
+        border_width: 1
+        border_color: 0xE5E5E5
+        border_opa: COVER
+        radius: 12
+        shadow_width: 0
+        widgets:
+          - label:
+              align: TOP_LEFT
+              x: 12
+              y: 6
+              text_font: noto_sans_sc_24
+              text_color: 0x1A4A4A
+              text: "网络"
           - obj:
-              width: 100%
-              height: SIZE_CONTENT
-              bg_opa: TRANSP
-              border_opa: TRANSP
+              align: TOP_LEFT
+              x: 12
+              y: 40
+              width: 348
+              height: 1
+              bg_color: 0xEEEEEE
+              bg_opa: COVER
               border_width: 0
+              border_opa: TRANSP
               radius: 0
-              layout:
-                type: FLEX
-                flex_flow: ROW
-                flex_align_cross: CENTER
-                pad_column: 16
-              widgets:
-                # ── 显示卡 ──
-                - obj:
-                    styles: ui_card
-                    flex_grow: 1
-                    height: SIZE_CONTENT
-                    layout:
-                      type: FLEX
-                      flex_flow: COLUMN
-                      pad_row: 8
-                    widgets:
-                      - label:
-                          styles: ui_module_title
-                          text: "显示"
-                      - obj:
-                          styles: ui_divider
-                      - obj:
-                          styles: ui_row
-                          layout:
-                            type: FLEX
-                            flex_flow: ROW
-                            flex_align_cross: CENTER
-                            pad_column: 10
-                          widgets:
-                            - label:
-                                styles: ui_label
-                                text: "亮度"
-                                flex_grow: 1
-                            - slider:
-                                id: backlight_slider
-                                width: 170
-                                height: 22
-                                min_value: 5      # 别给 0：全黑容易被当成死机
-                                max_value: 100
-                                value: 80
-                                bg_color: 0xECECEC
-                                bg_opa: COVER
-                                radius: 11
-                                indicator:
-                                  radius: 11
-                                  bg_color: 0xFF8C00
-                                knob:
-                                  bg_opa: TRANSP
-                                on_release:
-                                  - light.turn_on:
-                                      id: backlight
-                                      brightness: !lambda |-
-                                        return x / 100.0f;
-                            - label:
-                                id: brightness_value
-                                styles: ui_value
-                                width: 64
-                                text_align: RIGHT
-                                text: "80%"
-                # ── 网络卡 ──
-                - obj:
-                    styles: ui_card
-                    flex_grow: 1
-                    height: SIZE_CONTENT
-                    layout:
-                      type: FLEX
-                      flex_flow: COLUMN
-                      pad_row: 6
-                    widgets:
-                      - label:
-                          styles: ui_module_title
-                          text: "网络"
-                      - obj:
-                          styles: ui_divider
-                      - obj:
-                          styles: ui_row
-                          layout:
-                            type: FLEX
-                            flex_flow: ROW
-                            flex_align_cross: CENTER
-                            pad_column: 10
-                          widgets:
-                            - label:
-                                styles: ui_label
-                                text: "WiFi名称"
-                                flex_grow: 1
-                            - label:
-                                id: ssid_value
-                                text_font: noto_sans_sc_24
-                                text_color: 0x333333
-                                bg_opa: TRANSP
-                                width: 190
-                                text_align: RIGHT
-                                text: "--"
-                      - obj:
-                          styles: ui_row
-                          layout:
-                            type: FLEX
-                            flex_flow: ROW
-                            flex_align_cross: CENTER
-                            pad_column: 10
-                          widgets:
-                            - label:
-                                styles: ui_label
-                                text: "IP地址"
-                                flex_grow: 1
-                            - label:
-                                id: ip_value
-                                styles: ui_value
-                                width: 190
-                                text_align: RIGHT
-                                text: "--"
-                      - obj:
-                          styles: ui_row
-                          layout:
-                            type: FLEX
-                            flex_flow: ROW
-                            flex_align_cross: CENTER
-                            pad_column: 10
-                          widgets:
-                            - label:
-                                styles: ui_label
-                                text: "信号强度"
-                                flex_grow: 1
-                            - label:
-                                id: rssi_value
-                                styles: ui_value
-                                width: 190
-                                text_align: RIGHT
-                                text: "-- dBm"
-                      - obj:
-                          styles: ui_row
-                          layout:
-                            type: FLEX
-                            flex_flow: ROW
-                            flex_align_cross: CENTER
-                            pad_column: 10
-                          widgets:
-                            - label:
-                                styles: ui_label
-                                text: "API状态"
-                                flex_grow: 1
-                            - label:
-                                id: api_state
-                                text_font: noto_sans_sc_24
-                                text_color: 0x333333
-                                bg_opa: TRANSP
-                                width: 190
-                                text_align: RIGHT
-                                text: "未连接"
-                      - obj:
-                          styles: ui_row
-                          layout:
-                            type: FLEX
-                            flex_flow: ROW
-                            flex_align_cross: CENTER
-                            pad_column: 10
-                          widgets:
-                            - label:
-                                styles: ui_label
-                                text: "重启设备"
-                                flex_grow: 1
-                            - button:
-                                id: btn_restart
-                                width: 110
-                                height: 34
-                                radius: 8
-                                bg_color: 0xE74C3C
-                                bg_opa: COVER
-                                border_opa: TRANSP
-                                shadow_opa: TRANSP
-                                on_press:
-                                  - button.press: restart_button
-                                widgets:
-                                  - label:
-                                      text_font: noto_sans_sc_24
-                                      text: "重启"
-                                      align: CENTER
-                                      text_color: 0xFFFFFF
+          - label:
+              align: TOP_LEFT
+              x: 12
+              y: 58
+              text_font: noto_sans_sc_24
+              text_color: 0x333333
+              text: "IP地址"
+          - label:
+              id: ip_value
+              align: TOP_LEFT
+              x: 150
+              y: 58
+              width: 210
+              text_align: RIGHT
+              text_font: montserrat_24
+              text_color: 0x333333
+              text: "--"
 
 # ------------------------------------------------------------
 # 脚本
