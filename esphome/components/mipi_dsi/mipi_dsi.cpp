@@ -217,18 +217,54 @@ void MipiDsi::update() {
   this->y_high_ = 0;
 }
 
+// ★★★ 2026-10-03 M4R1：面板相位补偿常量上移到文件级（draw_pixel_at 与 draw_pixels_at 共用）。
+//   物理模型见 draw_pixel_at 内大段注释：面板整帧线性"早读" X_SHIFT 个像素，
+//   ⇒ 任何绕过 draw_pixel_at 的批量写路径都必须把写入位置整体 −X_SHIFT（环形）。
+static constexpr int X_SHIFT = 10;
+
 void MipiDsi::draw_pixels_at(int x_start, int y_start, int w, int h, const uint8_t *ptr, display::ColorOrder order,
                              display::ColorBitness bitness, bool big_endian, int x_offset, int y_offset, int x_pad) {
   if (w <= 0 || h <= 0)
     return;
-  // if color mapping is required, pass the buck.
+  // 颜色位宽不匹配（需要转换）或 display 层有旋转（非 LVGL 场景）：交给基类逐像素实现，
+  // 基类会逐点调用本类 draw_pixel_at ⇒ 旋转 + X_SHIFT 补偿自动生效。
   // note that endianness is not considered here - it is assumed to match!
-  if (bitness != this->color_depth_) {
+  if (bitness != this->color_depth_ || this->rotation_ != display::DISPLAY_ROTATION_0_DEGREES) {
     display::Display::draw_pixels_at(x_start, y_start, w, h, ptr, order, bitness, big_endian, x_offset, y_offset,
                                      x_pad);
     return;
   }
-  this->write_to_display_(x_start, y_start, w, h, ptr, x_offset, y_offset, x_pad);
+  // ★★★ M4R1：LVGL 位图快路径 + X_SHIFT 补偿。
+  //   旧实现这里直接 write_to_display_ ⇒ 绕过补偿，LVGL 界面整体偏 10px 且最底部回绕到顶部
+  //   （= R5 之前 full_test lambda 的症状 a）。LVGL 模式下 rotation 配在 lvgl: 组件上
+  //   （display 层禁止配 rotation），flush 给出的已是面板物理坐标、x_offset=0 ⇒ 逐行补偿：
+  //     行 drow 的 w 个像素应写到线性下标 (drow*W + x_start − X_SHIFT) 起：
+  //     · dcol = x_start − X_SHIFT ≥ 0：同行连续段，单次 draw_bitmap（与旧行为同开销，绝大多数 flush 走这里）；
+  //     · dcol < 0：环形回绕——本行前 (−dcol) 个像素落到**上一行末尾**（drow=0 时上一行 = 最后一行），
+  //       其余落到本行开头 ⇒ 逐行拆两段推（整行全宽的 flush 为 2×h 次小拷贝，DPI 帧缓冲是 memcpy，毫秒级）。
+  const int bpp = 3 - this->color_depth_;
+  const size_t stride = (x_offset + w + x_pad) * bpp;
+  const uint8_t *src = ptr + (size_t) y_offset * stride + (size_t) x_offset * bpp;
+  for (int row = 0; row < h; row++) {
+    const uint8_t *srow = src + (size_t) row * stride;
+    const int drow = y_start + row;
+    const int dcol = x_start - X_SHIFT;
+    if (dcol >= 0) {
+      this->write_to_display_(dcol, drow, w, 1, srow, 0, 0, 0);
+    } else {
+      const int head = -dcol;  // 落到上一行末尾的像素数（1..X_SHIFT）
+      if (head >= w) {
+        // 整行都回绕进上一行末尾
+        const int prow = (drow == 0) ? this->height_ - 1 : drow - 1;
+        this->write_to_display_(this->width_ - head, prow, w, 1, srow, 0, 0, 0);
+      } else {
+        const int tail = w - head;
+        const int prow = (drow == 0) ? this->height_ - 1 : drow - 1;
+        this->write_to_display_(this->width_ - head, prow, head, 1, srow, 0, 0, 0);
+        this->write_to_display_(0, drow, tail, 1, srow + (size_t) head * bpp, 0, 0, 0);
+      }
+    }
+  }
 }
 
 void MipiDsi::write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset, int y_offset,
@@ -329,8 +365,8 @@ void MipiDsi::draw_pixel_at(int x, int y, Color color) {
   //     filled_circle / rectangle 都最终经 draw_pixel_at ⇒ 只改这一处即全局生效。
   //     两个已核例外（本补偿**不**覆盖）：
   //       ① MipiDsi::fill() 被本文件重写为直接 std::fill_n —— 整屏同色，平移不影响观感。
-  //       ② draw_pixels_at()（贴图/位图路径）绕过 draw_pixel_at ⇒ M4 显示图片时要另行补偿。
-  static constexpr int X_SHIFT = 10;
+  //       ② draw_pixels_at()（贴图/位图路径）已于 M4R1 补齐：同样的 X_SHIFT 逐行补偿
+  //         （LVGL 的 flush 走的就是它；X_SHIFT 常量已上移到文件级，两个函数共用）。
   const size_t frame_px = static_cast<size_t>(this->width_) * static_cast<size_t>(this->height_);
   size_t pos = (static_cast<size_t>(y) * static_cast<size_t>(this->width_)) + static_cast<size_t>(x);
   pos = (pos + frame_px - static_cast<size_t>(X_SHIFT)) % frame_px;

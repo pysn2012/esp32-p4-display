@@ -1,0 +1,746 @@
+# ============================================================
+# ESP32-P4 DFR1286 —— 主界面（M4 阶段）
+# ============================================================
+# 参考 M5 Tab5 ESPHome 工程（M5_tab5_esphome）的主页/设置页，适配 800×480 横屏：
+#   顶栏  ：左 = 主页/设置 导航按钮 + 页面标题；右 = API、WiFi 状态图标 + USB 供电图标（本板无电池）
+#   主页  ：大时钟（HH:MM）+ 日期 + 星期
+#   设置页：显示（背光亮度滑块）/ 网络（WiFi 名称、IP、信号强度、API 状态、重启）
+#
+# ★ 与 full_test.yaml 的显示架构差异（LVGL 模式的硬约束，实核 lvgl/__init__.py 校验器）：
+#   · display 层禁止配 rotation / lambda / pages / auto_clear: true
+#     ⇒ display 保持原生 480×800（rotation 缺省 0），rotation: 270 放在 lvgl: 下；
+#       触摸 transform 用原生恒等（Tab5 同款），坐标旋转由 LVGL 统一处理。
+#   · mipi_dsi 组件的 draw_pixels_at 已补 X_SHIFT 逐行补偿（M4R1）——
+#     LVGL 的 flush 走这条位图路径，不补就会整体偏 10px 且底部回绕到顶部（R5 之前的症状）。
+#
+# 时间源：SNTP（WiFi 连上即走）；时区 Asia/Shanghai。
+# WiFi  ：C6 协处理器走 ESP-Hosted（SDIO slot 0 = GPIO14~19，EN=GPIO5）。
+#         ★ 若 WiFi 一直连不上：确认 C6 里烧的是 esp-hosted slave 固件
+#           （DFRobot 出厂镜像未必带；参考 Tab5 的 C6 刷法 / esphome.io/components/esp32_hosted）。
+# 编译  ：GitHub CI（build esphome screentest → config 选 ui.yaml）
+# 验收看点（第一轮实烧）：
+#   ① 顶栏文字与屏幕最上沿对齐、无 1px 错位（X_SHIFT 补偿在 LVGL 路径生效的直接证据）
+#   ② 触摸跟手、方向正确（若整体偏 90°：优先怀疑 LVGL rotation 与触摸 transform 的配合）
+#   ③ 亮度滑块实时生效；④ 时间在 WiFi 连上后跳动
+# ============================================================
+substitutions:
+  test_round: "M4R1"
+  test_round_desc: "LVGL 主界面：顶栏(WiFi/API/USB供电) + 主页(时钟/日期/星期) + 设置页(背光/网络信息/重启)；mipi_dsi draw_pixels_at 补 X_SHIFT"
+  # ★ 改成你自己的 WiFi（本工程约定单文件、无 secrets）
+  wifi_ssid: "YourWiFiName"
+  wifi_password: "YourWiFiPassword"
+
+esphome:
+  name: p4-ui
+  friendly_name: P4 Display UI
+  project:
+    name: p4.ui
+    version: "${test_round}"
+  on_boot:
+    - priority: 600
+      then:
+        - logger.log:
+            format: "===== BOOT CONFIG = P4 UI [${test_round}] ====="
+            level: INFO
+        - logger.log:
+            format: "[${test_round}] ${test_round_desc}"
+            level: INFO
+
+external_components:
+  - source:
+      type: local
+      path: components
+    components: [mipi_dsi, st7123]
+
+esp32:
+  variant: esp32p4
+  flash_size: 16MB
+  cpu_frequency: 360MHz
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+
+# 片内 32MB hex PSRAM（LVGL 缓冲与 DSI 帧缓冲都靠它）
+psram:
+  mode: hex
+  speed: 200MHz
+
+# 片内 LDO 通道 3 输出 2.5V 供 MIPI DPHY
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+# ------------------------------------------------------------
+# ESP32-C6 WiFi 协处理器（ESP-Hosted，原理图第 7 页）
+#   C6 SDIO 挂在 P4 的 SDMMC slot 0：CLK=GPIO18 CMD=GPIO19 D0~D3=GPIO14~17
+#   C6_EN=GPIO5（EN，R16 10K 上拉）、C6_WAKEUP=GPIO6（本组件未用，留作休眠唤醒）
+#   （TF 卡在 slot 1 = GPIO39~45，与本组件无关）
+# ------------------------------------------------------------
+esp32_hosted:
+  variant: ESP32C6
+  active_high: true
+  reset_pin: GPIO5
+  clk_pin: GPIO18
+  cmd_pin: GPIO19
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  slot: 0
+
+wifi:
+  ssid: ${wifi_ssid}
+  password: ${wifi_password}
+  power_save_mode: none
+  # 桌面 UI 板：离线不重启循环（要恢复缺省行为删掉这两行 0s）
+  reboot_timeout: 0s
+  ap:
+    ssid: "P4-UI-Setup"
+    password: "12345678"
+  on_connect:
+    then:
+      - lvgl.widget.show: wifi_icon
+  on_disconnect:
+    then:
+      - lvgl.widget.hide: wifi_icon
+
+captive_portal:
+
+api:
+  reboot_timeout: 0s
+  on_client_connected:
+    then:
+      - lvgl.widget.show: api_icon
+      - lvgl.label.update:
+          id: api_state
+          text: "已连接"
+  on_client_disconnected:
+    then:
+      - lvgl.widget.hide: api_icon
+      - lvgl.label.update:
+          id: api_state
+          text: "未连接"
+
+ota:
+  platform: esphome
+
+logger:
+  level: DEBUG
+
+# ------------------------------------------------------------
+# 公共 I2C 总线（触摸 ST7123 0x55；音频 ES8388 0x11 本轮不启用）
+# ------------------------------------------------------------
+i2c:
+  - id: bus_a
+    sda: GPIO7
+    scl: GPIO8
+    frequency: 400kHz
+    scan: true
+
+# ------------------------------------------------------------
+# 时间：SNTP（时区上海）。同步前时钟显示 --:--
+# ------------------------------------------------------------
+time:
+  - platform: sntp
+    id: ntp_time
+    timezone: Asia/Shanghai
+    on_time_sync:
+      then:
+        - script.execute: ui_update_clock
+    on_time:
+      - seconds: /1
+        then:
+          - script.execute: ui_update_clock
+
+# WiFi 信息（设置页展示）
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: ip_ts
+      on_value:
+        then:
+          - lvgl.label.update:
+              id: ip_value
+              text: !lambda |-
+                return x.empty() ? std::string("--") : x;
+    ssid:
+      id: ssid_ts
+      on_value:
+        then:
+          - lvgl.label.update:
+              id: ssid_value
+              text: !lambda |-
+                return x.empty() ? std::string("--") : x;
+
+sensor:
+  - platform: wifi_signal
+    id: wifi_rssi
+    update_interval: 30s
+    on_value:
+      then:
+        - lvgl.label.update:
+            id: rssi_value
+            text: !lambda |-
+              if (isnan(x))
+                return std::string("-- dBm");
+              char buf[16];
+              snprintf(buf, sizeof(buf), "%.0f dBm", x);
+              return std::string(buf);
+
+button:
+  - platform: restart
+    id: restart_button
+    name: "重启设备"
+
+# ------------------------------------------------------------
+# 背光（M1 定论：GPIO11，HIGH 亮）
+# ------------------------------------------------------------
+output:
+  - platform: ledc
+    pin:
+      number: GPIO11
+      inverted: false
+    id: backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    id: backlight
+    name: "屏幕背光"
+    restore_mode: ALWAYS_ON
+
+# ------------------------------------------------------------
+# 显示（原生 480×800；rotation 归 LVGL；面板 10px 相位补偿在组件里）
+# ------------------------------------------------------------
+display:
+  - platform: mipi_dsi
+    id: main_display
+    model: CUSTOM
+    dimensions:
+      width: 480
+      height: 800
+    # ★ LVGL 模式：display 层不许配 rotation（lvgl 组件校验会拒）——270° 旋转在下面 lvgl: 里
+    color_order: RGB
+    lane_bit_rate: 500Mbps
+    pclk_frequency: 36MHz
+    # porch 为厂商值（M1 实测改 porch 无效；10px 相位由组件 X_SHIFT 软件补偿）
+    hsync_back_porch: 40
+    hsync_pulse_width: 2
+    hsync_front_porch: 40
+    vsync_back_porch: 10
+    vsync_pulse_width: 2
+    vsync_front_porch: 180
+    reset_pin: GPIO21
+    show_test_card: false
+    auto_clear_enabled: false
+    update_interval: never
+    # ST7102 厂商初始化序列（与 full_test.yaml 完全一致；组件自动追加 0x11/0x29，勿手写）
+    init_sequence:
+      - [0x99, 0x71, 0x02, 0xA2]
+      - [0x99, 0x71, 0x02, 0xA3]
+      - [0x99, 0x71, 0x02, 0xA4]
+      - [0xA4, 0x31]
+      - [0xB0, 0x22, 0x57, 0x1E, 0x61, 0x2F, 0x57, 0x61]
+      - [0xB7, 0x64, 0x64]
+      - [0xBF, 0xB4, 0xB4]
+      - [0xC8, 0x00, 0x00, 0x0F, 0x1C, 0x34, 0x00, 0x60, 0x03, 0xA0, 0x06, 0x10, 0xFE, 0x06, 0x74, 0x03, 0x21, 0xC4, 0x00, 0x08, 0x00, 0x22, 0x46, 0x0F, 0x8F, 0x0A, 0x32, 0xF2, 0x0C, 0x42, 0x0C, 0xF3, 0x80, 0x00, 0xAB, 0xC0, 0x03, 0xC4]
+      - [0xC9, 0x00, 0x00, 0x0F, 0x1C, 0x34, 0x00, 0x60, 0x03, 0xA0, 0x06, 0x10, 0xFE, 0x06, 0x74, 0x03, 0x21, 0xC4, 0x00, 0x08, 0x00, 0x22, 0x46, 0x0F, 0x8F, 0x0A, 0x32, 0xF2, 0x0C, 0x42, 0x0C, 0xF3, 0x80, 0x00, 0xAB, 0xC0, 0x03, 0xC4]
+      - [0xD7, 0x10, 0x0C, 0x36, 0x19, 0x90, 0x90]
+      - [0xA3, 0x51, 0x03, 0x80, 0xCF, 0x44, 0x00, 0x00, 0x00, 0x00, 0x04, 0x78, 0x78, 0x00, 0x1A, 0x00, 0x45, 0x05, 0x00, 0x00, 0x00, 0x00, 0x46, 0x00, 0x00, 0x02, 0x20, 0x52, 0x00, 0x05, 0x00, 0x00, 0xFF]
+      - [0xA6, 0x02, 0x00, 0x24, 0x55, 0x35, 0x00, 0x38, 0x00, 0x78, 0x78, 0x00, 0x24, 0x55, 0x36, 0x00, 0x37, 0x00, 0x78, 0x78, 0x02, 0xAC, 0x51, 0x3A, 0x00, 0x00, 0x00, 0x78, 0x78, 0x03, 0xAC, 0x21, 0x00, 0x04, 0x00, 0x00, 0x78, 0x78, 0x3E, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00]
+      - [0xA7, 0x19, 0x19, 0x00, 0x64, 0x40, 0x07, 0x16, 0x40, 0x00, 0x04, 0x03, 0x78, 0x78, 0x00, 0x64, 0x40, 0x25, 0x34, 0x00, 0x00, 0x02, 0x01, 0x78, 0x78, 0x00, 0x64, 0x40, 0x4B, 0x5A, 0x00, 0x00, 0x02, 0x01, 0x78, 0x78, 0x00, 0x24, 0x40, 0x69, 0x78, 0x00, 0x00, 0x00, 0x00, 0x78, 0x78, 0x00, 0x44]
+      - [0xAC, 0x08, 0x0A, 0x11, 0x00, 0x13, 0x03, 0x1B, 0x18, 0x06, 0x1A, 0x19, 0x1B, 0x1B, 0x1B, 0x18, 0x1B, 0x09, 0x0B, 0x10, 0x02, 0x12, 0x01, 0x1B, 0x18, 0x06, 0x1A, 0x19, 0x1B, 0x1B, 0x1B, 0x18, 0x1B, 0xFF, 0x67, 0xFF, 0x67, 0x00]
+      - [0xAD, 0xCC, 0x40, 0x46, 0x11, 0x04, 0x78, 0x78]
+      - [0xE8, 0x30, 0x07, 0x00, 0x94, 0x94, 0x9C, 0x00, 0xE2, 0x04, 0x00, 0x00, 0x00, 0x00, 0xEF]
+      - [0xE7, 0x8B, 0x3C, 0x00, 0x0C, 0xF0, 0x5D, 0x00, 0x5D, 0x00, 0x5D, 0x00, 0x5D, 0x00, 0xFF, 0x00, 0x08, 0x7B, 0x00, 0x00, 0xC8, 0x6A, 0x5A, 0x08, 0x1A, 0x3C, 0x00, 0x81, 0x01, 0xCC, 0x01, 0x7F, 0xF0, 0x22]
+      - [0x35, 0x00]
+
+# ------------------------------------------------------------
+# 触摸（原生坐标恒等；旋转由 LVGL 统一处理——Tab5 同款配法）
+# ------------------------------------------------------------
+touchscreen:
+  - platform: st7123
+    id: main_touch
+    i2c_id: bus_a
+    interrupt_pin: GPIO20
+    reset_pin: GPIO13
+    update_interval: never
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: false
+
+# ------------------------------------------------------------
+# 字体
+#   icon_28        = Material Design Icons（本地 TTF，与 Tab5 同一款字体文件）
+#   montserrat_96  = 大时钟（仅数字+冒号，子集很小）
+#   montserrat_28  = 数值（IP/百分比/dBm）
+#   noto_sans_sc_28= 中文标签（按需子集，缺字不报错——SSID 可能含任意字符）
+# ------------------------------------------------------------
+font:
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: icon_28
+    size: 28
+    bpp: 4
+    glyphs: [
+      "\U000F02DC", # home 主页
+      "\U000F0493", # cog 设置
+      "\U000F05A9", # wifi
+      "\U000F109B", # home-assistant（API 连接）
+      "\U000F06A5", # power-plug（USB 供电，本板无电池）
+      "\U000F0451", # restart
+    ]
+  - file: gfonts://Montserrat@600
+    id: montserrat_96
+    size: 96
+    bpp: 4
+    glyphs: "0123456789:"
+  - file: gfonts://Montserrat@600
+    id: montserrat_28
+    size: 28
+    bpp: 4
+    glyphs: "0123456789.%:- dBm"
+  - file: gfonts://Noto+Sans+SC
+    id: noto_sans_sc_28
+    size: 28
+    bpp: 4
+    glyphs: "主页设置显示网络亮度强名地址状态重启已未连接信号星期一二三四五六日0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz%:.()-_ "
+    ignore_missing_glyphs: true
+
+# ------------------------------------------------------------
+# LVGL 界面（800×480 逻辑横屏）
+# ------------------------------------------------------------
+lvgl:
+  rotation: 270
+  color_depth: 16
+  byte_order: little_endian
+  buffer_size: 10%
+  style_definitions:
+    - id: ui_card
+      bg_color: 0xFFFFFF
+      bg_opa: COVER
+      border_width: 1
+      border_color: 0xE5E5E5
+      border_opa: COVER
+      radius: 12
+      pad_all: 12
+      shadow_width: 0
+    - id: ui_module_title
+      text_font: noto_sans_sc_28
+      text_color: 0x1A4A4A
+      bg_opa: TRANSP
+    - id: ui_divider
+      bg_color: 0xEEEEEE
+      bg_opa: COVER
+      height: 1
+      width: 100%
+    - id: ui_row
+      bg_opa: TRANSP
+      border_opa: TRANSP
+      border_width: 0
+      radius: 0
+      width: 100%
+      height: SIZE_CONTENT
+    - id: ui_label
+      text_font: noto_sans_sc_28
+      text_color: 0x333333
+      bg_opa: TRANSP
+    - id: ui_value
+      text_font: montserrat_28
+      text_color: 0x333333
+      bg_opa: TRANSP
+  on_boot:
+    # 滑块/数值与背光实际值对齐（light restore 后的值）
+    - lvgl.slider.update:
+        id: backlight_slider
+        value: !lambda |-
+          return (int) (id(backlight).current_values.get_brightness() * 100 + 0.5f);
+    - lvgl.label.update:
+        id: brightness_value
+        text: !lambda |-
+          int pct = (int) (id(backlight).current_values.get_brightness() * 100 + 0.5f);
+          return esphome::to_string(pct) + "%";
+  widgets:
+    # ────────────────────────── 顶栏（56px）──────────────────────────
+    - obj:
+        id: top_bar
+        align: TOP_LEFT
+        width: 100%
+        height: 56
+        bg_color: 0xFFFFFF
+        bg_opa: COVER
+        border_width: 0
+        border_opa: TRANSP
+        radius: 0
+        pad_left: 16
+        pad_right: 16
+        pad_top: 8
+        pad_bottom: 8
+        layout:
+          type: FLEX
+          flex_flow: ROW
+          flex_align_main: START
+          flex_align_cross: CENTER
+          pad_column: 12
+        widgets:
+          - button:
+              id: btn_nav_home
+              width: 128
+              height: 40
+              radius: 20
+              bg_color: 0xCCE8E7
+              bg_opa: COVER
+              border_opa: TRANSP
+              shadow_opa: TRANSP
+              on_press:
+                - script.execute: page_go_home
+              layout:
+                type: FLEX
+                flex_flow: ROW
+                flex_align_main: CENTER
+                flex_align_cross: CENTER
+                pad_column: 6
+              widgets:
+                - label:
+                    text_font: icon_28
+                    text_color: 0x1A4A4A
+                    text: "\U000F02DC"
+                - label:
+                    text_font: noto_sans_sc_28
+                    text_color: 0x1A4A4A
+                    text: "主页"
+          - button:
+              id: btn_nav_settings
+              width: 128
+              height: 40
+              radius: 20
+              bg_color: 0xECECEC
+              bg_opa: COVER
+              border_opa: TRANSP
+              shadow_opa: TRANSP
+              on_press:
+                - script.execute: page_go_settings
+              layout:
+                type: FLEX
+                flex_flow: ROW
+                flex_align_main: CENTER
+                flex_align_cross: CENTER
+                pad_column: 6
+              widgets:
+                - label:
+                    text_font: icon_28
+                    text_color: 0x3F4948
+                    text: "\U000F0493"
+                - label:
+                    text_font: noto_sans_sc_28
+                    text_color: 0x3F4948
+                    text: "设置"
+          - label:
+              id: page_title
+              text_font: noto_sans_sc_28
+              text_color: 0x999999
+              text: "主页"
+              flex_grow: 1
+          # 状态图标：API / WiFi（连接后才显示）+ USB 供电（常显，本板无电池）
+          - label:
+              id: api_icon
+              hidden: true
+              text_font: icon_28
+              text_color: 0x1A4A4A
+              text: "\U000F109B"
+          - label:
+              id: wifi_icon
+              hidden: true
+              text_font: icon_28
+              text_color: 0x1A4A4A
+              text: "\U000F05A9"
+          - label:
+              id: pwr_icon
+              text_font: icon_28
+              text_color: 0x1A4A4A
+              text: "\U000F06A5"
+    # ────────────────────────── 主页（时钟）──────────────────────────
+    - obj:
+        id: page_home
+        align: TOP_LEFT
+        y: 56
+        width: 100%
+        height: 424
+        bg_color: 0xF5F5F5
+        bg_opa: COVER
+        border_width: 0
+        border_opa: TRANSP
+        radius: 0
+        widgets:
+          - label:
+              id: time_label
+              align: CENTER
+              y: -40
+              text_font: montserrat_96
+              text_color: 0x1A4A4A
+              text: "--:--"
+          - label:
+              id: date_label
+              align: CENTER
+              y: 48
+              text_font: noto_sans_sc_28
+              text_color: 0x666666
+              text: "---- -- --"
+    # ────────────────────────── 设置页 ──────────────────────────
+    - obj:
+        id: page_settings
+        hidden: true
+        align: TOP_LEFT
+        y: 56
+        width: 100%
+        height: 424
+        bg_color: 0xF5F5F5
+        bg_opa: COVER
+        border_width: 0
+        border_opa: TRANSP
+        radius: 0
+        layout:
+          type: FLEX
+          flex_flow: ROW
+          flex_align_main: CENTER
+          flex_align_cross: CENTER
+          pad_column: 16
+        pad_left: 16
+        pad_right: 16
+        widgets:
+          # ── 显示卡 ──
+          - obj:
+              styles: ui_card
+              width: 368
+              height: 392
+              layout:
+                type: FLEX
+                flex_flow: COLUMN
+                pad_row: 10
+              widgets:
+                - label:
+                    styles: ui_module_title
+                    text: "显示"
+                - obj:
+                    styles: ui_divider
+                - obj:
+                    styles: ui_row
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW
+                      flex_align_cross: CENTER
+                      pad_column: 12
+                    widgets:
+                      - label:
+                          styles: ui_label
+                          text: "亮度"
+                          flex_grow: 1
+                      - slider:
+                          id: backlight_slider
+                          width: 160
+                          height: 26
+                          min_value: 5      # 别给 0：全黑容易被当成死机
+                          max_value: 100
+                          value: 60
+                          bg_color: 0xECECEC
+                          bg_opa: COVER
+                          radius: 13
+                          indicator:
+                            radius: 13
+                            bg_color: 0xFF8C00
+                          knob:
+                            bg_opa: TRANSP
+                          on_release:
+                            - light.turn_on:
+                                id: backlight
+                                brightness: !lambda |-
+                                  return x / 100.0f;
+                            - lvgl.label.update:
+                                id: brightness_value
+                                text: !lambda |-
+                                  return esphome::to_string((int) x) + "%";
+                      - label:
+                          id: brightness_value
+                          styles: ui_value
+                          width: 80
+                          text_align: RIGHT
+                          text: "60%"
+          # ── 网络卡 ──
+          - obj:
+              styles: ui_card
+              width: 368
+              height: 392
+              layout:
+                type: FLEX
+                flex_flow: COLUMN
+                pad_row: 8
+              widgets:
+                - label:
+                    styles: ui_module_title
+                    text: "网络"
+                - obj:
+                    styles: ui_divider
+                - obj:
+                    styles: ui_row
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW
+                      flex_align_cross: CENTER
+                      pad_column: 12
+                    widgets:
+                      - label:
+                          styles: ui_label
+                          text: "WiFi名称"
+                          flex_grow: 1
+                      - label:
+                          id: ssid_value
+                          text_font: noto_sans_sc_28
+                          text_color: 0x333333
+                          bg_opa: TRANSP
+                          width: 180
+                          text_align: RIGHT
+                          text: "--"
+                - obj:
+                    styles: ui_row
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW
+                      flex_align_cross: CENTER
+                      pad_column: 12
+                    widgets:
+                      - label:
+                          styles: ui_label
+                          text: "IP地址"
+                          flex_grow: 1
+                      - label:
+                          id: ip_value
+                          styles: ui_value
+                          width: 180
+                          text_align: RIGHT
+                          text: "--"
+                - obj:
+                    styles: ui_row
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW
+                      flex_align_cross: CENTER
+                      pad_column: 12
+                    widgets:
+                      - label:
+                          styles: ui_label
+                          text: "信号强度"
+                          flex_grow: 1
+                      - label:
+                          id: rssi_value
+                          styles: ui_value
+                          width: 180
+                          text_align: RIGHT
+                          text: "-- dBm"
+                - obj:
+                    styles: ui_row
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW
+                      flex_align_cross: CENTER
+                      pad_column: 12
+                    widgets:
+                      - label:
+                          styles: ui_label
+                          text: "API状态"
+                          flex_grow: 1
+                      - label:
+                          id: api_state
+                          text_font: noto_sans_sc_28
+                          text_color: 0x333333
+                          bg_opa: TRANSP
+                          width: 180
+                          text_align: RIGHT
+                          text: "未连接"
+                - obj:
+                    styles: ui_row
+                    layout:
+                      type: FLEX
+                      flex_flow: ROW
+                      flex_align_cross: CENTER
+                      pad_column: 12
+                    widgets:
+                      - label:
+                          styles: ui_label
+                          text: "重启设备"
+                          flex_grow: 1
+                      - button:
+                          id: btn_restart
+                          width: 120
+                          height: 40
+                          radius: 8
+                          bg_color: 0xE74C3C
+                          bg_opa: COVER
+                          border_opa: TRANSP
+                          shadow_opa: TRANSP
+                          on_press:
+                            - button.press: restart_button
+                          widgets:
+                            - label:
+                                text_font: noto_sans_sc_28
+                                text: "重启"
+                                align: CENTER
+                                text_color: 0xFFFFFF
+
+# ------------------------------------------------------------
+# 脚本
+# ------------------------------------------------------------
+script:
+  - id: page_go_home
+    then:
+      - lvgl.widget.show: page_home
+      - lvgl.widget.hide: page_settings
+      - lvgl.label.update:
+          id: page_title
+          text: "主页"
+  - id: page_go_settings
+    then:
+      - lvgl.widget.hide: page_home
+      - lvgl.widget.show: page_settings
+      - lvgl.label.update:
+          id: page_title
+          text: "设置"
+  - id: ui_update_clock
+    then:
+      - lvgl.label.update:
+          id: time_label
+          text: !lambda |-
+            auto t = id(ntp_time).now();
+            if (!t.is_valid())
+              return std::string("--:--");
+            return t.strftime("%H:%M");
+      - lvgl.label.update:
+          id: date_label
+          text: !lambda |-
+            auto t = id(ntp_time).now();
+            if (!t.is_valid())
+              return std::string("----");
+            // ESPTime.day_of_week: 1=周日 .. 7=周六
+            static const char *const WEEKDAY[] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"};
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.year, t.month, t.day_of_month);
+            return std::string(buf) + " " + WEEKDAY[t.day_of_week - 1];
+
+# ------------------------------------------------------------
+# 开机竞态兜底：WiFi/API 可能先于 LVGL 就绪连上
+# （之后的状态变化仍由 wifi/api 的触发器实时驱动；show 幂等，无副作用）
+# ------------------------------------------------------------
+interval:
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            - wifi.connected:
+          then:
+            - lvgl.widget.show: wifi_icon
+      - if:
+          condition:
+            - api.connected:
+          then:
+            - lvgl.widget.show: api_icon
