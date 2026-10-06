@@ -72,7 +72,7 @@ lvgl:
         id: card_display
         align: BOTTOM_LEFT
         x: 20
-        y: -16
+        y: -40
         width: 372
         height: 108
         bg_color: 0xFFFFFF
@@ -146,7 +146,7 @@ lvgl:
         id: card_network
         align: BOTTOM_RIGHT
         x: -20
-        y: -16
+        y: -40
         width: 372
         height: 108
         bg_color: 0xFFFFFF

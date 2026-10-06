@@ -7,7 +7,7 @@
 #   底部   ：显示卡（亮度滑块）+ 网络卡（目前仅 IP 地址，后续加行）
 #
 # ★ 框架坐标系（加内容照这个加）：
-#   顶栏 y 0..44；时钟块垂直居中一带 y≈140..270；两卡底边距屏 16px、高 108、行距 36
+#   顶栏 y 0..44；时钟块垂直居中一带 y≈140..270；两卡底边距屏 40px、高 108、行距 36
 #   卡内行 y：标题 6 / 分隔线 40 / 第1行 58 / 第2行 94 / 第3行 130 ...（每行 +36）
 #   左卡 align BOTTOM_LEFT x20；右卡 align BOTTOM_RIGHT x−20；卡宽 372
 #
@@ -23,8 +23,8 @@
 # 编译：GitHub Actions（build esphome screentest → 选 ui.yaml）
 # ============================================================
 substitutions:
-  test_round: "M4R6"
-  test_round_desc: "WiFi 修复：slot 0→1（P4 slot0 是 IOMUX 固定脚 39-44=TF 卡，14-19 走 slot1 GPIO 矩阵；旧配置引脚越界被弃用）"
+  test_round: "M4R7"
+  test_round_desc: "显示校准：vsync_back_porch 10→78（面板 VSYNC 后 ~68 行才开窗，帧头被吞=整体左移68）；两卡底边距 16→40"
 
 esphome:
   name: p4-ui
