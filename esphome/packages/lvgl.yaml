@@ -1,8 +1,19 @@
 # ============================================================
 # lvgl.yaml —— 界面（800×480 逻辑横屏；全部绝对定位）
-# 坐标系文档见 ui.yaml 文件头（顶栏/时钟/两卡的位置与行距约定）。
-# ★ M4R3 教训：嵌套 flex 在这块屏上不按预期渲染，只用绝对定位。
+# 坐标系文档见 ui.yaml 文件头。
+# ★ 全局水平微调：改下方 ui_x_off 一个数即可整体左右平移（正=右移）。
+#   原理：所有元素都挂在 ui_root 容器下，容器 x = ui_x_off。
+#   注意 ui_x_off > 0 时根容器会超出屏幕右侧，屏幕将变得可横向滚动少许，
+#   校准完成后如需彻底禁滚动，把各元素坐标直接写死、去掉容器偏移。
+# ★ M4R8 校准辅助（量完残差后下一版移除）：
+#   深色底 + 三根 2px 竖标尺线（红 x=20 / 绿 x=400 / 蓝 x=780），
+#   正对拍照量出三条线的实际落点，即可算出精确的水平残差。
+# ★ M4R3 教训：嵌套 flex 不按预期渲染，只用绝对定位（容器内绝对定位没问题——
+#   卡片内部标签在 M4R6 实测位置全部正确）。
 # ============================================================
+substitutions:
+  ui_x_off: "0"   # 内容整体水平偏移（px，正=右移）；M4R8 暂为 0，等标尺照片定值
+
 lvgl:
   rotation: 270
   color_depth: 16
@@ -12,183 +23,234 @@ lvgl:
     - script.execute: ui_sync_brightness
     - lambda: 'id(lvgl_ready) = true;'
   widgets:
-    # ─────────────── 顶栏背景条（44px 白底；无布局语义）───────────────
+    # ─────────────── 根容器（深色底；整体水平偏移挂在这里）───────────────
     - obj:
-        id: top_bar
+        id: ui_root
         align: TOP_LEFT
-        width: 100%
-        height: 44
-        bg_color: 0xFFFFFF
+        x: ${ui_x_off}
+        y: 0
+        width: 800
+        height: 480
+        bg_color: 0x202020
         bg_opa: COVER
         border_width: 0
         border_opa: TRANSP
         radius: 0
         widgets:
-          # 图标钉在栏内右上角：x 间距 38px
-          - label:
-              id: api_icon
-              hidden: true
-              align: TOP_RIGHT
-              x: -92
-              y: 10
-              text_font: icon_24
-              text_color: 0x1A4A4A
-              text: "\U000F109B"
-          - label:
-              id: wifi_icon
-              hidden: true
-              align: TOP_RIGHT
-              x: -54
-              y: 10
-              text_font: icon_24
-              text_color: 0x1A4A4A
-              text: "\U000F05A9"
-          - label:
-              id: pwr_icon
-              align: TOP_RIGHT
-              x: -16
-              y: 10
-              text_font: icon_24
-              text_color: 0x1A4A4A
-              text: "\U000F06A5"
-    # ─────────────── 中部：时钟 + 日期 + 星期（屏幕居中，偏上给底部两卡让位）───────────────
-    - label:
-        id: time_label
-        align: CENTER
-        y: -72
-        text_font: montserrat_56
-        text_color: 0x1A4A4A
-        text: "--:--"
-    - label:
-        id: date_label
-        align: CENTER
-        y: 10
-        text_font: noto_sans_sc_24
-        text_color: 0x666666
-        text: "----"
-    # ─────────────── 左下：显示卡（372×108）───────────────
-    # 卡内坐标系：标题 y6 / 分隔线 y40 / 第1行 y58 / 第2行 y94 ...
-    - obj:
-        id: card_display
-        align: BOTTOM_LEFT
-        x: 20
-        y: -40
-        width: 372
-        height: 108
-        bg_color: 0xFFFFFF
-        bg_opa: COVER
-        border_width: 1
-        border_color: 0xE5E5E5
-        border_opa: COVER
-        radius: 12
-        shadow_width: 0
-        widgets:
-          - label:
-              align: TOP_LEFT
-              x: 12
-              y: 6
-              text_font: noto_sans_sc_24
-              text_color: 0x1A4A4A
-              text: "显示"
+          # ─────────────── 校准标尺线（临时：红20 / 绿400 / 蓝780）───────────────
           - obj:
+              id: ruler_l
               align: TOP_LEFT
-              x: 12
-              y: 40
-              width: 348
-              height: 1
-              bg_color: 0xEEEEEE
+              x: 20
+              y: 0
+              width: 2
+              height: 480
+              bg_color: 0xFF2020
               bg_opa: COVER
               border_width: 0
               border_opa: TRANSP
               radius: 0
-          - label:
-              align: TOP_LEFT
-              x: 12
-              y: 58
-              text_font: noto_sans_sc_24
-              text_color: 0x333333
-              text: "亮度"
-          - slider:
-              id: backlight_slider
-              align: TOP_LEFT
-              x: 96
-              y: 60
-              width: 180
-              height: 22
-              min_value: 5      # 别给 0：全黑容易被当成死机
-              max_value: 100
-              value: 80
-              bg_color: 0xECECEC
-              bg_opa: COVER
-              radius: 11
-              indicator:
-                radius: 11
-                bg_color: 0xFF8C00
-              knob:
-                bg_opa: TRANSP
-              on_release:
-                - light.turn_on:
-                    id: backlight
-                    brightness: !lambda |-
-                      return x / 100.0f;
-          - label:
-              id: brightness_value
-              align: TOP_LEFT
-              x: 288
-              y: 58
-              width: 72
-              text_align: RIGHT
-              text_font: montserrat_24
-              text_color: 0x333333
-              text: "80%"
-    # ─────────────── 右下：网络卡（372×108，暂只留 IP；加行照头部坐标系）───────────────
-    - obj:
-        id: card_network
-        align: BOTTOM_RIGHT
-        x: -20
-        y: -40
-        width: 372
-        height: 108
-        bg_color: 0xFFFFFF
-        bg_opa: COVER
-        border_width: 1
-        border_color: 0xE5E5E5
-        border_opa: COVER
-        radius: 12
-        shadow_width: 0
-        widgets:
-          - label:
-              align: TOP_LEFT
-              x: 12
-              y: 6
-              text_font: noto_sans_sc_24
-              text_color: 0x1A4A4A
-              text: "网络"
           - obj:
+              id: ruler_c
               align: TOP_LEFT
-              x: 12
-              y: 40
-              width: 348
-              height: 1
-              bg_color: 0xEEEEEE
+              x: 400
+              y: 0
+              width: 2
+              height: 480
+              bg_color: 0x20FF20
               bg_opa: COVER
               border_width: 0
               border_opa: TRANSP
               radius: 0
-          - label:
+          - obj:
+              id: ruler_r
               align: TOP_LEFT
-              x: 12
-              y: 58
-              text_font: noto_sans_sc_24
-              text_color: 0x333333
-              text: "IP地址"
-          - label:
-              id: ip_value
+              x: 780
+              y: 0
+              width: 2
+              height: 480
+              bg_color: 0x2040FF
+              bg_opa: COVER
+              border_width: 0
+              border_opa: TRANSP
+              radius: 0
+          # ─────────────── 顶栏背景条（44px 白底；无布局语义）───────────────
+          - obj:
+              id: top_bar
               align: TOP_LEFT
-              x: 150
-              y: 58
-              width: 210
-              text_align: RIGHT
-              text_font: montserrat_24
-              text_color: 0x333333
-              text: "--"
+              width: 100%
+              height: 44
+              bg_color: 0xFFFFFF
+              bg_opa: COVER
+              border_width: 0
+              border_opa: TRANSP
+              radius: 0
+              widgets:
+                # 图标钉在栏内右上角：x 间距 38px
+                - label:
+                    id: api_icon
+                    hidden: true
+                    align: TOP_RIGHT
+                    x: -92
+                    y: 12
+                    text_font: icon_20
+                    text_color: 0x1A4A4A
+                    text: "\U000F109B"
+                - label:
+                    id: wifi_icon
+                    hidden: true
+                    align: TOP_RIGHT
+                    x: -54
+                    y: 12
+                    text_font: icon_20
+                    text_color: 0x1A4A4A
+                    text: "\U000F05A9"
+                - label:
+                    id: pwr_icon
+                    align: TOP_RIGHT
+                    x: -16
+                    y: 12
+                    text_font: icon_20
+                    text_color: 0x1A4A4A
+                    text: "\U000F06A5"
+          # ─────────────── 中部：时钟 + 日期 + 星期 ───────────────
+          - label:
+              id: time_label
+              align: CENTER
+              y: -64
+              text_font: montserrat_48
+              text_color: 0xFFFFFF
+              text: "--:--"
+          - label:
+              id: date_label
+              align: CENTER
+              y: 8
+              text_font: noto_sans_sc_20
+              text_color: 0xAAAAAA
+              text: "----"
+          # ─────────────── 左下：显示卡（348×100，x 40..388）───────────────
+          # 卡内坐标系：标题 y4 / 分隔线 y32 / 第1行 y46 / 第2行 y74 ...（每行 +28）
+          - obj:
+              id: card_display
+              align: BOTTOM_LEFT
+              x: 40
+              y: -40
+              width: 348
+              height: 100
+              bg_color: 0xFFFFFF
+              bg_opa: COVER
+              border_width: 1
+              border_color: 0xE5E5E5
+              border_opa: COVER
+              radius: 12
+              shadow_width: 0
+              widgets:
+                - label:
+                    align: TOP_LEFT
+                    x: 10
+                    y: 4
+                    text_font: noto_sans_sc_20
+                    text_color: 0x1A4A4A
+                    text: "显示"
+                - obj:
+                    align: TOP_LEFT
+                    x: 10
+                    y: 32
+                    width: 328
+                    height: 1
+                    bg_color: 0xEEEEEE
+                    bg_opa: COVER
+                    border_width: 0
+                    border_opa: TRANSP
+                    radius: 0
+                - label:
+                    align: TOP_LEFT
+                    x: 10
+                    y: 46
+                    text_font: noto_sans_sc_20
+                    text_color: 0x333333
+                    text: "亮度"
+                - slider:
+                    id: backlight_slider
+                    align: TOP_LEFT
+                    x: 64
+                    y: 48
+                    width: 160
+                    height: 18
+                    min_value: 5      # 别给 0：全黑容易被当成死机
+                    max_value: 100
+                    value: 80
+                    bg_color: 0xECECEC
+                    bg_opa: COVER
+                    radius: 9
+                    indicator:
+                      radius: 9
+                      bg_color: 0xFF8C00
+                    knob:
+                      bg_opa: TRANSP
+                    on_release:
+                      - light.turn_on:
+                          id: backlight
+                          brightness: !lambda |-
+                            return x / 100.0f;
+                - label:
+                    id: brightness_value
+                    align: TOP_LEFT
+                    x: 274
+                    y: 46
+                    width: 62
+                    text_align: RIGHT
+                    text_font: montserrat_20
+                    text_color: 0x333333
+                    text: "80%"
+          # ─────────────── 右下：网络卡（348×100，x 412..760）───────────────
+          - obj:
+              id: card_network
+              align: BOTTOM_RIGHT
+              x: -40
+              y: -40
+              width: 348
+              height: 100
+              bg_color: 0xFFFFFF
+              bg_opa: COVER
+              border_width: 1
+              border_color: 0xE5E5E5
+              border_opa: COVER
+              radius: 12
+              shadow_width: 0
+              widgets:
+                - label:
+                    align: TOP_LEFT
+                    x: 10
+                    y: 4
+                    text_font: noto_sans_sc_20
+                    text_color: 0x1A4A4A
+                    text: "网络"
+                - obj:
+                    align: TOP_LEFT
+                    x: 10
+                    y: 32
+                    width: 328
+                    height: 1
+                    bg_color: 0xEEEEEE
+                    bg_opa: COVER
+                    border_width: 0
+                    border_opa: TRANSP
+                    radius: 0
+                - label:
+                    align: TOP_LEFT
+                    x: 10
+                    y: 46
+                    text_font: noto_sans_sc_20
+                    text_color: 0x333333
+                    text: "IP地址"
+                - label:
+                    id: ip_value
+                    align: TOP_LEFT
+                    x: 194
+                    y: 46
+                    width: 142
+                    text_align: RIGHT
+                    text_font: montserrat_20
+                    text_color: 0x333333
+                    text: "--"

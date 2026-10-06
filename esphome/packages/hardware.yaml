@@ -103,22 +103,20 @@ display:
       height: 800
     # ★ LVGL 模式：display 层不许配 rotation（lvgl 组件校验会拒）——270° 旋转在 lvgl.yaml 里
     color_order: RGB
-    # ★ 界面整体偏移校准（M4R7 起两轴分开调）：
-    #   · 逻辑垂直（列相位）：组件 x_shift（=10，M1 实测值；改它上下移动）
-    #   · 逻辑水平（行相位）：vsync_back_porch —— 面板在 VSYNC 后固定 ~68 行才开采样窗，
-    #     帧头内容行被吞 ⇒ 整体左移 68（M4R6 照片实测：右卡右边框 780→711、左卡标签被裁）。
-    #     VBP 10→78 把内容整体推迟 68 行 = 右移 68px；VFP 同步 −68 保持总行数 962（刷新率不变）。
-    #     ★ 校准只改一个数：仍偏左 N px → VBP 再 +N（VFP −N）；右移过头 → 反向减。
-    #     （M1 "改 porch 无效" 仅对 hsync 成立：面板按 DSI 包界逐行取样，行内空白长度不影响起点）
+    # ★ 偏移校准策略（M4R8 定稿）：
+    #   显示驱动保持 M1/M2 校准值（porch=厂商值、x_shift=10），不再改动。
+    #   实测规律（M4R6→M4R7 差分）：vsync_back_porch 每加大 1 行 ≈ 内容整体左移 1px，
+    #   故 porch 不是水平校准旋钮；水平残差由内容侧校准（lvgl.yaml 的 ui_x_off +
+    #   界面内置标尺线拍照定值）。
     x_shift: 10
     lane_bit_rate: 500Mbps
     pclk_frequency: 36MHz
     hsync_back_porch: 40
     hsync_pulse_width: 2
     hsync_front_porch: 40
-    vsync_back_porch: 78
+    vsync_back_porch: 10
     vsync_pulse_width: 2
-    vsync_front_porch: 112
+    vsync_front_porch: 180
     reset_pin: GPIO21
     show_test_card: false
     auto_clear_enabled: false
