@@ -1,0 +1,15 @@
+# ============================================================
+# sensor.yaml —— 传感器 / 网络状态实体
+# 网络卡展示用；后续要加行（RSSI/SSID/信号图标）时往这里加实体即可。
+# ============================================================
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: ip_ts
+      on_value:
+        then:
+          - lvgl.label.update:
+              id: ip_value
+              text: !lambda |-
+                return x.empty() ? std::string("--") : x;

@@ -1,0 +1,38 @@
+# ============================================================
+# fonts.yaml —— 字体（图标 + 数字 + 中文子集）
+#   icon_24        = Material Design Icons（本地 TTF，与 Tab5 同一款）
+#   montserrat_56  = 大时钟（数字+冒号+"-"，占位符 --:-- 无框框）
+#   montserrat_24  = 数值（IP/百分比）
+#   noto_sans_sc_24= 中文标签（按需子集；缺字不报错）
+# 注意：noto 子集字符是从各处实际用到的中文收集去重的，
+#   新增中文文案后若显示成框框，把新字补进 glyphs 即可。
+# ============================================================
+font:
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: icon_24
+    size: 24
+    bpp: 4
+    glyphs: [
+      "\U000F02DC", # home
+      "\U000F0493", # cog 设置
+      "\U000F05A9", # wifi
+      "\U000F109B", # home-assistant（API 连接）
+      "\U000F06A5", # power-plug（USB 供电，本板无电池）
+      "\U000F0451", # restart
+    ]
+  - file: gfonts://Montserrat@600
+    id: montserrat_56
+    size: 56
+    bpp: 4
+    glyphs: "0123456789:-"
+  - file: gfonts://Montserrat@600
+    id: montserrat_24
+    size: 24
+    bpp: 4
+    glyphs: "0123456789.%:- dBm"
+  - file: gfonts://Noto+Sans+SC
+    id: noto_sans_sc_24
+    size: 24
+    bpp: 4
+    glyphs: "显示亮度网络地址已未连接星期一二三四五六日0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz%:.()-_ "
+    ignore_missing_glyphs: true

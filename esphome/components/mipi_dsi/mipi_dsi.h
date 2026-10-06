@@ -59,6 +59,9 @@ class MipiDsi final : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
+  // ★ M4R5：面板相位补偿量（原 R5 写死 10）——yaml display 配置 `x_shift:` 可调，
+  //   draw_pixel_at / draw_pixels_at 两处共用；LVGL 界面整体偏移时改这一个数字。
+  void set_x_shift(int x_shift) { this->x_shift_ = x_shift; }
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -100,6 +103,7 @@ class MipiDsi final : public display::Display {
   display::ColorOrder color_mode_{display::COLOR_ORDER_BGR};
   display::ColorBitness color_depth_;
   uint8_t pixel_mode_{};
+  int x_shift_{10};  // 面板整帧线性相位补偿（像素），缺省 = R5 实测值 10
 
   esp_lcd_panel_handle_t handle_{};
   esp_lcd_dsi_bus_handle_t bus_handle_{};

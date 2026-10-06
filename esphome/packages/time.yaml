@@ -1,0 +1,14 @@
+# ============================================================
+# time.yaml —— SNTP 时间源（时区上海；同步前时钟显示 --:--）
+# ============================================================
+time:
+  - platform: sntp
+    id: ntp_time
+    timezone: Asia/Shanghai
+    on_time_sync:
+      then:
+        - script.execute: ui_update_clock
+    on_time:
+      - seconds: /1
+        then:
+          - script.execute: ui_update_clock

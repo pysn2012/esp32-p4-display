@@ -217,10 +217,10 @@ void MipiDsi::update() {
   this->y_high_ = 0;
 }
 
-// ★★★ 2026-10-03 M4R1：面板相位补偿常量上移到文件级（draw_pixel_at 与 draw_pixels_at 共用）。
-//   物理模型见 draw_pixel_at 内大段注释：面板整帧线性"早读" X_SHIFT 个像素，
-//   ⇒ 任何绕过 draw_pixel_at 的批量写路径都必须把写入位置整体 −X_SHIFT（环形）。
-static constexpr int X_SHIFT = 10;
+// ★★★ M4R1：面板相位补偿 —— 物理模型见 draw_pixel_at 内大段注释：面板整帧线性"早读"
+//   若干像素，任何绕过 draw_pixel_at 的批量写路径都必须把写入位置做同样的环形平移。
+// ★ M4R5：补偿量不再写死 —— yaml display 配置 `x_shift:`（缺省 10 = R5 实测值），
+//   draw_pixel_at / draw_pixels_at 两处共用；LVGL 界面整体偏移时改这一个数字即可。
 
 void MipiDsi::draw_pixels_at(int x_start, int y_start, int w, int h, const uint8_t *ptr, display::ColorOrder order,
                              display::ColorBitness bitness, bool big_endian, int x_offset, int y_offset, int x_pad) {
@@ -245,24 +245,35 @@ void MipiDsi::draw_pixels_at(int x_start, int y_start, int w, int h, const uint8
   const int bpp = 3 - this->color_depth_;
   const size_t stride = (x_offset + w + x_pad) * bpp;
   const uint8_t *src = ptr + (size_t) y_offset * stride + (size_t) x_offset * bpp;
+  const int W = (int) this->width_;
+  const int H = (int) this->height_;
+  const int shift = this->x_shift_;
   for (int row = 0; row < h; row++) {
     const uint8_t *srow = src + (size_t) row * stride;
     const int drow = y_start + row;
-    const int dcol = x_start - X_SHIFT;
-    if (dcol >= 0) {
+    const int dcol = x_start - shift;
+    if (dcol >= 0 && dcol + w <= W) {
+      // 同行连续段（绝大多数 flush 走这里）
       this->write_to_display_(dcol, drow, w, 1, srow, 0, 0, 0);
-    } else {
-      const int head = -dcol;  // 落到上一行末尾的像素数（1..X_SHIFT）
+    } else if (dcol < 0) {
+      // 环形回绕：本行前 (−dcol) 个像素落到**上一行末尾**（drow=0 时上一行 = 最后一行）
+      const int head = -dcol;  // 1..|shift|
+      const int prow = (drow == 0) ? H - 1 : drow - 1;
       if (head >= w) {
         // 整行都回绕进上一行末尾
-        const int prow = (drow == 0) ? this->height_ - 1 : drow - 1;
-        this->write_to_display_(this->width_ - head, prow, w, 1, srow, 0, 0, 0);
+        this->write_to_display_(W - head, prow, w, 1, srow, 0, 0, 0);
       } else {
-        const int tail = w - head;
-        const int prow = (drow == 0) ? this->height_ - 1 : drow - 1;
-        this->write_to_display_(this->width_ - head, prow, head, 1, srow, 0, 0, 0);
-        this->write_to_display_(0, drow, tail, 1, srow + (size_t) head * bpp, 0, 0, 0);
+        this->write_to_display_(W - head, prow, head, 1, srow, 0, 0, 0);
+        this->write_to_display_(0, drow, w - head, 1, srow + (size_t) head * bpp, 0, 0, 0);
       }
+    } else {
+      // dcol + w > W（shift 为负时才会出现）：本行行尾溢出回绕到**下一行开头**
+      const int head = W - dcol;  // 留在本行的像素数（可能为 0）
+      const int tail = w - head;
+      const int nrow = (drow == H - 1) ? 0 : drow + 1;
+      if (head > 0)
+        this->write_to_display_(dcol, drow, head, 1, srow, 0, 0, 0);
+      this->write_to_display_(0, nrow, tail, 1, srow + (size_t) head * bpp, 0, 0, 0);
     }
   }
 }
@@ -358,18 +369,19 @@ void MipiDsi::draw_pixel_at(int x, int y, Color color) {
   //   【为什么只能软件修】实测 hsync_back_porch 40→30 重烧，画面**完全不动**；
   //     porch 确实进了 esp_lcd_dpi_panel_config_t.video_timing（见本文件 84 行），
   //     且整帧走 write_to_display_ 的对齐整幅快路径（x_offset==0 && x_pad==0）。
-  //   【调法】X_SHIFT = 0 关闭；与实测不符时改符号（−10 → +10，即把下面那个减法换成加法）。
+  //   【调法】M4R5 起补偿量由 yaml display 配置 `x_shift:` 控制（0 = 关闭，负值 = 反向），
+  //     draw_pixel_at / draw_pixels_at（LVGL 位图路径）两处共用同一个值。
   //     若哪天要退回旧的"行内取模"，把那两行换成：
   //       x = (x - X_SHIFT + width_) % width_;   pos = y * width_ + x;
   //   【覆盖面】display.cpp 的 filled_rectangle / horizontal_line / line / circle /
   //     filled_circle / rectangle 都最终经 draw_pixel_at ⇒ 只改这一处即全局生效。
   //     两个已核例外（本补偿**不**覆盖）：
   //       ① MipiDsi::fill() 被本文件重写为直接 std::fill_n —— 整屏同色，平移不影响观感。
-  //       ② draw_pixels_at()（贴图/位图路径）已于 M4R1 补齐：同样的 X_SHIFT 逐行补偿
-  //         （LVGL 的 flush 走的就是它；X_SHIFT 常量已上移到文件级，两个函数共用）。
+  //       ② draw_pixels_at()（贴图/位图路径）已于 M4R1 补齐：同样的逐行补偿
+  //         （LVGL 的 flush 走的就是它；补偿量已做成 yaml 可调 `x_shift:`，两个函数共用）。
   const size_t frame_px = static_cast<size_t>(this->width_) * static_cast<size_t>(this->height_);
   size_t pos = (static_cast<size_t>(y) * static_cast<size_t>(this->width_)) + static_cast<size_t>(x);
-  pos = (pos + frame_px - static_cast<size_t>(X_SHIFT)) % frame_px;
+  pos = (pos + frame_px - static_cast<size_t>(this->x_shift_)) % frame_px;
   switch (this->color_depth_) {
     case display::COLOR_BITNESS_565: {
       auto *ptr_16 = reinterpret_cast<uint16_t *>(this->buffer_);

@@ -113,6 +113,9 @@ def model_schema(config: ConfigType) -> cv.All:
             model.option(CONF_PIXEL_MODE, PIXEL_MODE_16BIT): cv.one_of(
                 *pixel_modes, lower=True
             ),
+            # ★ M4R5：面板整帧线性相位补偿（像素）。缺省 10 = R5 实测值；
+            #   LVGL 界面整体偏移时改这一个数字（正 = 内容沿面板扫描方向后移）。
+            cv.Optional("x_shift", default=10): cv.int_range(min=-100, max=100),
             model.option(CONF_TRANSFORM, cv.UNDEFINED): transform,
             cv.Required(CONF_MODEL): cv.one_of(model.name, upper=True),
             model.option(CONF_INVERT_COLORS, False): cv.boolean,
@@ -198,6 +201,7 @@ async def to_code(config: ConfigType) -> None:
         model.get_dimensions(config)
     )
     var = cg.new_Pvariable(config[CONF_ID], width, height, color_depth, pixel_mode)
+    cg.add(var.set_x_shift(config["x_shift"]))
 
     sequence = model.get_sequence(config)
     cg.add(var.set_model(config[CONF_MODEL]))

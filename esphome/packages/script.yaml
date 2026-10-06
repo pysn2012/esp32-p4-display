@@ -1,0 +1,67 @@
+# ============================================================
+# script.yaml —— 全局变量 / 脚本 / 定时兜底（UI 状态同步逻辑都在这）
+# ============================================================
+
+# 开机时序无关的 UI 同步开关（LVGL 就绪后才允许 light.on_state 反向刷滑块）
+globals:
+  - id: lvgl_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+script:
+  # 时钟（SNTP 同步前显示占位符；"--:--" 所需字符全部在时钟字体子集里）
+  - id: ui_update_clock
+    then:
+      - lvgl.label.update:
+          id: time_label
+          text: !lambda |-
+            auto t = id(ntp_time).now();
+            if (!t.is_valid())
+              return std::string("--:--");
+            return t.strftime("%H:%M");
+      - lvgl.label.update:
+          id: date_label
+          text: !lambda |-
+            auto t = id(ntp_time).now();
+            if (!t.is_valid())
+              return std::string("----");
+            // ESPTime.day_of_week: 1=周日 .. 7=周六
+            static const char *const WEEKDAY[] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"};
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%04d-%02d-%02d", t.year, t.month, t.day_of_month);
+            return std::string(buf) + " " + WEEKDAY[t.day_of_week - 1];
+  # 背光滑块 ⇆ light 实际值双向同步（light.on_state 触发；lvgl_ready 保证 LVGL 已就绪）
+  - id: ui_sync_brightness
+    then:
+      - lvgl.slider.update:
+          id: backlight_slider
+          value: !lambda |-
+            if (!id(backlight).current_values.is_on())
+              return 0;
+            return (int) (id(backlight).current_values.get_brightness() * 100 + 0.5f);
+      - lvgl.label.update:
+          id: brightness_value
+          text: !lambda |-
+            if (!id(backlight).current_values.is_on())
+              return std::string("0%");
+            int pct = (int) (id(backlight).current_values.get_brightness() * 100 + 0.5f);
+            return esphome::to_string(pct) + "%";
+
+# ------------------------------------------------------------
+# 开机竞态兜底：WiFi/API 可能先于 LVGL 就绪连上
+# （之后的状态变化仍由 ui.yaml 里 wifi/api 的触发器实时驱动；show 幂等，无副作用）
+# ------------------------------------------------------------
+interval:
+  - interval: 5s
+    then:
+      - if:
+          condition:
+            - wifi.connected:
+          then:
+            - lvgl.widget.show: wifi_icon
+      - if:
+          condition:
+            - api.connected:
+          then:
+            - lvgl.widget.show: api_icon
